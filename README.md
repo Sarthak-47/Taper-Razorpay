@@ -95,16 +95,21 @@ separates learning from month-to-month variance):
 
 | Month | Rules | Model calls / 100 records | Exceptions | Clean match rate | Precision | Recall |
 |---|---|---|---|---|---|---|
-| 1 | 1.9 | 0.82 | 10.0 | 62.0% | 1.000 | 0.911 |
-| 2 | 2.2 | 0.58 | 6.9 | 93.2% | 1.000 | 0.933 |
-| 3 | 2.5 | 0.54 | 6.8 | 93.2% | 1.000 | 0.934 |
-| 4 | 2.5 | 0.49 | 5.8 | 96.4% | 1.000 | 0.948 |
-| 5 | 2.5 | 0.61 | 7.1 | 95.5% | 1.000 | 0.931 |
-| 6 | 2.5 | 0.54 | 6.2 | **97.3%** | 1.000 | 0.940 |
+| 1 | 2.4 | 0.97 | 11.2 | 63.5% | 1.000 | 0.909 |
+| 2 | 3.2 | 0.65 | 8.1 | 85.9% | 1.000 | 0.924 |
+| 3 | 3.5 | 0.45 | 5.6 | 95.0% | 1.000 | 0.945 |
+| 4 | 3.5 | 0.47 | 6.1 | 95.3% | 1.000 | 0.940 |
+| 5 | 3.5 | **0.41** | 4.9 | **97.4%** | 1.000 | 0.955 |
+| 6 | 3.9 | 0.60 | 7.5 | 96.6% | 1.000 | 0.933 |
 
-**Model calls per 100 records fall 33%. Clean match rate goes 62.0% → 97.3%.
-Human reviews per close drop 10.0 → 6.2. Recall rises 0.911 → 0.940. Precision
+**Model calls per 100 records fall 39%. Clean match rate goes 63.5% → 96.6%.
+Human reviews per close drop 11.2 → 7.5. Recall rises 0.909 → 0.933. Precision
 stays at 1.000 the whole way.**
+
+Months 3–6 are the steady state; the learnable structure is absorbed by month 3
+and what remains is month-to-month noise. Month 6 ticking back up from month 5
+is that noise, not decay — which is exactly why the table is averaged over eight
+campaigns and shows every month rather than the best one.
 
 Three patterns are learnable in this world, and the system finds them:
 
@@ -112,6 +117,7 @@ Three patterns are learnable in this world, and the system finds them:
 |---|---|---|
 | `adjustment_pattern` | AXIS ₹250 "PROC CHG", SBI ₹500 "SVC CHG" | Recurring deductions stop reading as unexplained shortfalls |
 | `narration_alias` | KOTAK writes `REF 70000123456`, the report says `UTR70000123456` | A bank whose reference label the strict regex cannot parse becomes joinable |
+| `fee_variant` | International cards are contracted at 3%, not the 2% base | A rate card stops being reported as a pile of overcharges |
 | `bank_timing` | rarely fires — see below | Extends the settlement window for a slow bank |
 
 Note what does **not** happen: one-off adjustments are never learned. They are
@@ -121,7 +127,7 @@ generalises one. A rule store that absorbed those would be overfitting to noise.
 **Honest note on `bank_timing`:** it is implemented, gated and tested, but it
 rarely triggers — it requires a batch's exact amount to land outside the default
 window, which is uncommon. It is not carrying the result. The taper is driven by
-`adjustment_pattern` and `narration_alias`.
+`adjustment_pattern`, `narration_alias` and `fee_variant`.
 
 ```bash
 python -m taper.cli campaign --months 6 --average-runs 8
@@ -133,17 +139,17 @@ Deterministic layers only, 40 batches (~1,300 records) per seed:
 
 | Seed | Records | Precision | Recall | Clean match rate |
 |---|---|---|---|---|
-| 7 | 1,341 | 1.000 | 0.861 | 53.1% |
-| **99** *(held out)* | 1,356 | **1.000** | **0.897** | 60.6% |
-| 1234 | 1,363 | 1.000 | 0.878 | 69.7% |
-| 2025 | 1,362 | 1.000 | 0.928 | 47.2% |
+| 7 | 1,346 | 1.000 | 0.967 | 63.2% |
+| **99** *(held out)* | 1,339 | **1.000** | **0.888** | 55.9% |
+| 1234 | 1,272 | 1.000 | 0.815 | 53.1% |
+| 2025 | 1,344 | 1.000 | 0.908 | 68.6% |
 
 These are month-one numbers with an **empty rule store** — the honest cold-start
 baseline. Match rate is low because roughly half the banks take a recurring
 charge nobody has explained yet. That is the gap the campaign above closes.
 
 Precision is 1.000 across every seed — **zero false positives**, enforced as a
-test rather than merely observed. Cold-start recall is 0.86–0.93; what it misses
+test rather than merely observed. Cold-start recall is 0.82–0.97; what it misses
 is not silently dropped but lands on the exception list with a stated reason, and
 recall climbs to 0.94 once the rule store fills.
 
@@ -167,24 +173,23 @@ really does escalate about 80% of the time. So the model is scored with Brier
 and a reliability curve, and every raw score passes through isotonic regression
 fitted on a split disjoint from the training rows.
 
-Trained on seeds `[11..18]`, evaluated on `[901..904]` — **never fitted on**, and
+Trained on seeds `[11..26]`, evaluated on `[901..912]` — **never fitted on**, and
 `train_and_evaluate` raises if the two sets intersect:
 
 | Metric | Value |
 |---|---|
-| Brier score | **0.0616** |
-| Baseline (quote the base rate) | 0.1325 |
-| **Brier skill** | **+0.535** |
-| AUC | 0.895 |
+| Brier score | **0.0575** |
+| Baseline (quote the base rate) | 0.0923 |
+| **Brier skill** | **+0.377** |
+| AUC | 0.885 |
 
 The number that matters operationally is the review budget:
 
 | Review the riskiest… | Catch this share of escalations | Lift |
 |---|---|---|
-| **10% of batches** | **60%** | **6.0×** |
-| 20% | 76% | 3.8× |
-| 30% | 80% | 2.7× |
-| 40% | 84% | 2.1× |
+| **10% of batches** | **67%** | **6.7×** |
+| 20% | 73% | 3.7× |
+| 30% | 82% | 2.7× |
 
 ```bash
 python -m taper.cli risk
@@ -192,18 +197,25 @@ python -m taper.cli risk
 
 #### The model that shipped has no dependencies — and that was a measurement
 
-Gradient boosting was the obvious first choice. It lost:
+Gradient boosting was the obvious first choice. It never earned its place:
 
-| Backend | AUC | Brier | Skill |
-|---|---|---|---|
-| **logistic regression (no dependencies)** | **0.895** | **0.0616** | **+0.535** |
-| sklearn GradientBoostingClassifier | 0.847 | 0.0707 | +0.466 |
+| Backend | Batches | AUC | Brier | Skill |
+|---|---|---|---|---|
+| **logistic (no deps)** | 20 | **0.914** | **0.0555** | **+0.446** |
+| sklearn GBM | 20 | 0.851 | 0.0577 | +0.425 |
+| **logistic (no deps)** | 40 | 0.885 | 0.0575 | +0.377 |
+| sklearn GBM | 40 | 0.883 | **0.0569** | **+0.384** |
 
-Worse on ranking *and* worse on calibration. The signal here is close to linear
-in a couple of strong features, so the extra capacity buys variance rather than
-accuracy on a few hundred rows. So the shipped model is a ~40-line logistic
-regression trained by gradient descent, and scikit-learn is an optional extra
-kept only to reproduce the comparison:
+At the smaller sample the logistic regression wins clearly. At the larger one
+they are **within noise of each other** — GBM takes Brier skill by 0.007,
+logistic takes AUC by 0.002, and neither gap means anything.
+
+So the honest conclusion is not "the simple model won." It is that **the two are
+equivalent, and one of them costs a dependency.** The signal here is close to
+linear in a couple of strong features, so the extra capacity buys variance
+rather than accuracy on a few hundred rows. The shipped model is a ~40-line
+logistic regression trained by gradient descent, and scikit-learn is an optional
+extra kept only to reproduce the comparison:
 
 ```bash
 python -m taper.cli risk --compare
