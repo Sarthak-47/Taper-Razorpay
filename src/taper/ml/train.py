@@ -81,7 +81,7 @@ def train_and_evaluate(
     holdout_seeds: list[int] | None = None,
     n_batches: int = 40,
     seed: int = 0,
-    prefer: str = "logistic",
+    prefer: str = "auto",
 ) -> tuple[ExceptionRiskModel, RiskReport]:
     train_seeds = train_seeds or TRAIN_SEEDS
     holdout_seeds = holdout_seeds or HOLDOUT_SEEDS

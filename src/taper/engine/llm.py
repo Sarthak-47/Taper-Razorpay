@@ -26,13 +26,19 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from decimal import InvalidOperation
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from ..models import AMOUNT_TOLERANCE, DefectClass, Money
 from .results import Exception_, Finding, Layer
 
 MODEL = "claude-sonnet-5"
+
+# Largest share of a batch that a deduction may plausibly be. Bank charges are
+# small next to the payout; anything bigger is a missing credit wearing an
+# adjustment's label. Set generously - a real charge is well under 1% - so it
+# only ever rejects the absurd.
+MAX_ADJUSTMENT_SHARE = Decimal("0.25")
 
 SYSTEM_PROMPT = """You are the exception-resolution layer of a settlement reconciliation \
 system for an Indian payment gateway.
@@ -258,9 +264,27 @@ def verify_proposal(
     if claimed == "unrecorded_adjustment":
         # A shortfall is only an adjustment if money is actually *missing*.
         # An overpayment is a different problem and must not be relabelled.
-        if delta > AMOUNT_TOLERANCE:
-            return Verification(True, f"shortfall of {delta} confirmed", credited, delta)
-        return Verification(False, f"no shortfall to explain (delta {delta})", credited, delta)
+        if delta <= AMOUNT_TOLERANCE:
+            return Verification(False, f"no shortfall to explain (delta {delta})", credited, delta)
+
+        # And it has to be adjustment-*sized*. A bank charge is small next to
+        # the payout it comes out of; a "shortfall" that is a large fraction of
+        # the batch is a missing credit, not a deduction.
+        #
+        # Without this bound, "unrecorded adjustment" accepts a gap of any size
+        # and becomes a free parameter that explains everything - which is
+        # exactly how it slipped through: the mock claimed a Rs.64,051
+        # adjustment on a Rs.64,051 credit, i.e. the batch's missing half.
+        if expected_net > 0 and delta > expected_net * MAX_ADJUSTMENT_SHARE:
+            share = delta / expected_net
+            return Verification(
+                False,
+                f"claimed adjustment is {share:.0%} of the batch - too large to be "
+                f"a charge, more likely a missing credit",
+                credited,
+                delta,
+            )
+        return Verification(True, f"shortfall of {delta} confirmed", credited, delta)
 
     if claimed in {"narration_drift", "missing_utr", "timing_shift"}:
         if abs(delta) <= AMOUNT_TOLERANCE:

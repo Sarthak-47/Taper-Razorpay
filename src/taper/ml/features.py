@@ -29,6 +29,9 @@ FEATURE_NAMES = [
     "n_payments",
     "n_refunds",
     "refund_ratio",
+    "n_holds",
+    "hold_ratio",
+    "log_deductions",
     "log_net",
     "log_max_txn",
     "settlement_has_utr",
@@ -53,6 +56,13 @@ def batch_features(bundle: SourceBundle, batch_id: str) -> dict[str, float]:
 
     payments = [r for r in rows if r.txn_type is TxnType.PAYMENT]
     refunds = [r for r in rows if r.txn_type is TxnType.REFUND]
+    # Holds and refunds both pull money back out of the payout, so a batch full
+    # of them looks short before anything has gone wrong. Without these the
+    # model reads a legitimately reduced payout as a matching problem - which
+    # is what happened when chargeback holds entered the data and AUC fell from
+    # 0.885 to 0.803.
+    holds = [r for r in rows if r.txn_type is TxnType.CHARGEBACK_HOLD]
+    deductions = sum((r.gross_amount for r in refunds + holds), Money("0.00"))
     net = sum((r.net_amount for r in rows), Money("0.00"))
     settled_on = rows[0].settled_on
     utr = next((r.utr for r in rows if r.utr), None)
@@ -73,6 +83,9 @@ def batch_features(bundle: SourceBundle, batch_id: str) -> dict[str, float]:
         "n_payments": float(len(payments)),
         "n_refunds": float(len(refunds)),
         "refund_ratio": len(refunds) / len(rows) if rows else 0.0,
+        "n_holds": float(len(holds)),
+        "hold_ratio": len(holds) / len(rows) if rows else 0.0,
+        "log_deductions": _log1p_money(deductions),
         "log_net": _log1p_money(net),
         "log_max_txn": _log1p_money(max((r.gross_amount for r in rows), default=Money("0"))),
         "settlement_has_utr": 1.0 if utr else 0.0,

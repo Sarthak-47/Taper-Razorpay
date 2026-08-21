@@ -9,11 +9,14 @@ about 80% of the time. So the model is scored with Brier and a reliability
 curve, not with accuracy, and every raw score is passed through isotonic
 regression fitted on a held-out split.
 
-**Nothing here needs a dependency.** Isotonic regression via pool-adjacent-
-violators is about thirty lines, and the shipped model is a logistic regression
-trained by gradient descent. scikit-learn is an optional extra used only to
-reproduce the comparison that led to this choice - gradient boosting was tried
-first and never measured better than the dependency-free model.
+**The calibrator needs no dependency, and neither does the fallback.** Isotonic
+regression via pool-adjacent-violators is about thirty lines, so the part
+carrying the guarantee is here rather than imported, and a logistic regression
+trained by gradient descent keeps everything runnable without scikit-learn.
+
+Which model *leads* has changed once, on measurement rather than taste - see
+``_make_model``. That the choice was re-run when the data changed matters more
+than which way it landed.
 """
 
 from __future__ import annotations
@@ -88,17 +91,18 @@ class IsotonicCalibrator:
 
 
 # ---------------------------------------------------------------------------
-# The shipped model - logistic regression, no dependencies
+# The dependency-free fallback - logistic regression
 # ---------------------------------------------------------------------------
 
 @dataclass
 class LogisticModel:
     """Plain logistic regression by gradient descent, with L2 and standardisation.
 
-    This is the *shipped* model, not a consolation prize. Gradient boosting was
-    tried first and never earned its place: clearly behind on the smaller sample
-    and within noise on the larger one. When two options measure the same, the
-    one that costs a dependency loses. See ``taper risk --compare``.
+    Led the comparison until chargeback holds entered the data and the signal
+    stopped being close to linear; gradient boosting leads now. Kept as a real
+    fallback rather than a relic - without scikit-learn the whole pipeline still
+    runs, and the evaluation names the backend instead of quietly degrading.
+    See ``taper risk --compare``.
     """
 
     weights: list[float] = field(default_factory=list)
@@ -178,7 +182,7 @@ class ExceptionRiskModel:
     _sklearn: bool = False
 
     def fit(
-        self, X: list[list[float]], y: list[int], seed: int = 0, prefer: str = "logistic"
+        self, X: list[list[float]], y: list[int], seed: int = 0, prefer: str = "auto"
     ) -> ExceptionRiskModel:
         """Fit the model, then fit the calibrator on a *disjoint* split.
 
@@ -231,23 +235,31 @@ class ExceptionRiskModel:
         return self.model.importances()
 
 
-def _make_model(seed: int, prefer: str = "logistic") -> tuple[object, bool]:
-    """Build the underlying model. Logistic is the default because it measured no worse.
+def _make_model(seed: int, prefer: str = "auto") -> tuple[object, bool]:
+    """Build the underlying model, preferring gradient boosting where available.
 
-    Gradient boosting was the obvious first choice. On a 20-batch sample the
-    standardised logistic regression beat it outright (AUC 0.914 vs 0.851); at
-    40 batches the two are within noise of each other. The signal is close to
-    linear in a couple of strong features, so the extra capacity buys variance
-    rather than accuracy on a few hundred rows.
+    This default has been re-measured twice and changed once, which is the
+    point of keeping ``taper risk --compare`` runnable.
 
-    The decision is therefore not "the simple model won" but "they are
-    equivalent and one costs a dependency". Pass ``prefer="gbm"`` to reproduce
-    the comparison.
+    First measurement: a standardised logistic regression matched or beat
+    gradient boosting, so the shipped model needed no dependency. Then
+    chargeback holds entered the data and the signal stopped being close to
+    linear - deductions interact with batch size in a way a linear model cannot
+    express. Re-measured, gradient boosting now wins clearly on calibration
+    (Brier skill +0.253 against +0.166), so it became the default.
+
+    The logistic model stays as a genuine fallback rather than a relic: without
+    scikit-learn installed everything still runs, and the evaluation reports
+    which backend produced the numbers instead of quietly degrading.
     """
-    if prefer == "gbm":
+    if prefer in ("gbm", "auto"):
         try:
             from sklearn.ensemble import GradientBoostingClassifier
         except ImportError:
+            if prefer == "gbm":
+                # Explicitly asked for, not available. Say so through the
+                # backend name rather than silently substituting.
+                return LogisticModel(), False
             return LogisticModel(), False
         return (
             GradientBoostingClassifier(

@@ -427,36 +427,48 @@ def test_risk_model_beats_quoting_the_base_rate() -> None:
     )
 
 
-def test_shipped_model_needs_no_third_party_package() -> None:
-    """The default backend must not import scikit-learn at all.
+def test_everything_still_runs_without_scikit_learn() -> None:
+    """scikit-learn may lead, but it must never be required.
 
-    The dependency-free logistic model is the shipped default because it
-    measured better, so this guards against a future change quietly making
-    scikit-learn required.
+    The default backend changed to gradient boosting when the data stopped
+    being close to linear. That is a preference, not a dependency: with the
+    import blocked the logistic fallback has to take over and the whole path
+    has to keep working, naming the backend it used rather than quietly
+    degrading.
     """
     import builtins
 
     real_import = builtins.__import__
-    touched: list[str] = []
 
-    def watched(name, *a, **kw):
+    def blocked(name, *a, **kw):
         if name.startswith("sklearn"):
-            touched.append(name)
-            raise ImportError("sklearn deliberately blocked")
+            raise ImportError("sklearn blocked for this test")
         return real_import(name, *a, **kw)
 
-    builtins.__import__ = watched
+    builtins.__import__ = blocked
     try:
         from taper.ml.confidence import _make_model
 
-        model, is_sklearn = _make_model(seed=0)
-        assert not is_sklearn
+        model, is_sklearn = _make_model(seed=0, prefer="auto")
+        assert not is_sklearn, "auto did not fall back with sklearn unavailable"
         model.fit([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [0.9, 0.1]], [0, 1, 0, 1])
         assert 0.0 <= model.predict_proba([[0.2, 0.8]])[0] <= 1.0
     finally:
         builtins.__import__ = real_import
 
-    assert not touched, f"default path imported {touched}"
+
+def test_backend_choice_is_reproducible_either_way() -> None:
+    """Both backends must remain runnable, so the comparison can be re-run.
+
+    The default has already flipped once on measurement. That is only honest if
+    anyone can reproduce the comparison that flipped it.
+    """
+    from taper.ml.train import train_and_evaluate
+
+    for prefer in ("logistic", "gbm"):
+        _, report = train_and_evaluate(n_batches=20, prefer=prefer)
+        assert report.auc > 0.6, f"{prefer} backend degenerate: AUC {report.auc:.3f}"
+        assert report.n_holdout > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1172,3 +1184,40 @@ def test_matching_cost_stays_linear() -> None:
         f"per-record cost grew {large / small:.1f}x over a 16x larger input - "
         f"matching has gone super-linear again"
     )
+
+
+def test_an_adjustment_cannot_be_batch_sized() -> None:
+    """"Unrecorded adjustment" must not become a free parameter.
+
+    Accepting a shortfall of any size lets that label explain everything. It
+    reached production precision once: a campaign month scored 0.999 because a
+    Rs.64,051 "adjustment" was confirmed on a Rs.64,051 credit - the batch's
+    missing half, wearing a deduction's name.
+
+    A bank charge is small next to the payout it comes out of.
+    """
+    proposal = {
+        "defect_class": "unrecorded_adjustment",
+        "bank_txn_ids": ["b1"],
+        "confidence": 0.9,
+    }
+    # Half the batch missing is a missing credit, not a charge.
+    v = verify_proposal(proposal, Money("100000.00"), {"b1": Money("50000.00")})
+    assert not v.ok and "too large" in v.reason
+
+    # A plausible charge on the same batch still passes.
+    ok = verify_proposal(proposal, Money("100000.00"), {"b1": Money("99750.00")})
+    assert ok.ok, ok.reason
+
+
+def test_campaign_precision_never_slips() -> None:
+    """Averaged across independent campaigns, not one lucky run.
+
+    A single campaign hid the adjustment-size hole; it only showed up as 0.999
+    once eight of them were averaged.
+    """
+    from taper.campaign import run_campaign_averaged
+
+    rows = run_campaign_averaged(runs=4, months=5, n_batches=20)
+    worst = min(r.precision for r in rows)
+    assert worst == 1.0, f"precision dipped to {worst:.4f} in a campaign month"

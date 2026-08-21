@@ -27,9 +27,9 @@ deterministic layers and the offline mock have zero third-party dependencies.
 
 | | Month 1 | Month 6 |
 |---|---|---|
-| Model calls / 100 records | 0.97 | **0.60** *(−39%)* |
-| Clean match rate | 63.5% | **96.6%** |
-| Human reviews per close | 11.2 | **7.5** |
+| Model calls / 100 records | 1.11 | **0.61** *(−45%)* |
+| Clean match rate | 62.5% | **93.5%** |
+| Human reviews per close | 13.8 | **7.8** |
 | **Precision** | **1.000** | **1.000** |
 
 Four more things worth thirty seconds each:
@@ -50,7 +50,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**75 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**85 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -62,6 +62,7 @@ A merchant on a payment gateway has three sources of truth that never agree:
 | Source | What it says |
 |---|---|
 | **PG settlement report** | Individual payments, refunds, fees, GST on fees, chargeback holds |
+| **Rate card** | Different contracted rates per payment method — named nowhere in the report |
 | **Bank statement** | One lump credit per batch, messy free-text narration, T+1..T+3 lag |
 | **Internal ledger** | Order IDs and the amounts the merchant *thinks* it sold |
 
@@ -144,15 +145,15 @@ separates learning from month-to-month variance):
 
 | Month | Rules | Model calls / 100 records | Exceptions | Clean match rate | Precision | Recall |
 |---|---|---|---|---|---|---|
-| 1 | 2.4 | 0.97 | 11.2 | 63.5% | 1.000 | 0.909 |
-| 2 | 3.2 | 0.65 | 8.1 | 85.9% | 1.000 | 0.924 |
-| 3 | 3.5 | 0.45 | 5.6 | 95.0% | 1.000 | 0.945 |
-| 4 | 3.5 | 0.47 | 6.1 | 95.3% | 1.000 | 0.940 |
-| 5 | 3.5 | **0.41** | 4.9 | **97.4%** | 1.000 | 0.955 |
-| 6 | 3.9 | 0.60 | 7.5 | 96.6% | 1.000 | 0.933 |
+| 1 | 2.9 | 1.11 | 13.8 | 62.5% | 1.000 | 0.900 |
+| 2 | 3.1 | **0.51** | **5.9** | 91.4% | 1.000 | 0.949 |
+| 3 | 3.4 | 0.53 | 6.2 | **96.7%** | 1.000 | 0.939 |
+| 4 | 3.8 | 0.52 | 6.0 | 95.9% | 1.000 | 0.941 |
+| 5 | 3.9 | 0.61 | 7.4 | 92.4% | 1.000 | 0.933 |
+| 6 | 3.9 | 0.61 | 7.8 | 93.5% | 1.000 | 0.932 |
 
-**Model calls per 100 records fall 39%. Clean match rate goes 63.5% → 96.6%.
-Human reviews per close drop 11.2 → 7.5. Recall rises 0.909 → 0.933. Precision
+**Model calls per 100 records fall 45%. Clean match rate goes 62.5% → 93.5%.
+Human reviews per close drop 13.8 → 7.8. Recall rises 0.900 → 0.932. Precision
 stays at 1.000 the whole way.**
 
 Months 3–6 are the steady state; the learnable structure is absorbed by month 3
@@ -278,12 +279,12 @@ AXIS reprices from ₹250 to ₹375 at month 4:
 
 | Month | Rules | Exceptions | Match rate | Event |
 |---|---|---|---|---|
-| 1 | 2 | 10 | 63.9% | |
-| 2 | 4 | 14 | 81.8% | |
-| 3 | 4 | **0** | 95.0% | steady state |
-| 4 | 4 | 11 | 86.1% | **← AXIS repriced** |
-| 5 | 4 | 7 | **100.0%** | relearned |
-| 6 | 4 | **2** | 94.9% | |
+| 1 | 3 | 10 | 74.3% | |
+| 2 | 3 | **3** | 94.7% | steady state |
+| 3 | 3 | 3 | 94.7% | |
+| 4 | 4 | 9 | 78.4% | **← AXIS repriced** |
+| 5 | 4 | 5 | 91.9% | relearned |
+| 6 | 4 | 6 | 94.4% | |
 
 ```
 ACTIVE    adjustment_pattern_003   amount=375.00, keyword=PROC CHG
@@ -316,19 +317,19 @@ Deterministic layers only, 40 batches (~1,300 records) per seed:
 
 | Seed | Records | Precision | Recall | Clean match rate |
 |---|---|---|---|---|
-| 7 | 1,346 | 1.000 | 0.967 | 63.2% |
-| **99** *(held out)* | 1,339 | **1.000** | **0.888** | 55.9% |
-| 1234 | 1,272 | 1.000 | 0.815 | 53.1% |
-| 2025 | 1,344 | 1.000 | 0.908 | 68.6% |
+| 7 | 1,270 | 1.000 | 0.860 | 74.2% |
+| **99** *(held out)* | 1,364 | **1.000** | **0.908** | 76.5% |
+| 1234 | 1,295 | 1.000 | 0.944 | 69.4% |
+| 2025 | 1,427 | 1.000 | 0.882 | 45.5% |
 
 These are month-one numbers with an **empty rule store** — the honest cold-start
 baseline. Match rate is low because roughly half the banks take a recurring
 charge nobody has explained yet. That is the gap the campaign above closes.
 
 Precision is 1.000 across every seed — **zero false positives**, enforced as a
-test rather than merely observed. Cold-start recall is 0.82–0.97; what it misses
+test rather than merely observed. Cold-start recall is 0.86–0.94; what it misses
 is not silently dropped but lands on the exception list with a stated reason, and
-recall climbs to 0.94 once the rule store fills.
+recall climbs to 0.95 once the rule store fills.
 
 Per-class precision and recall, calibration, false-positive cost in review-minutes,
 and the auto-clear operating point all print from `reconcile`.
@@ -355,58 +356,61 @@ Trained on seeds `[11..26]`, evaluated on `[901..912]` — **never fitted on**, 
 
 | Metric | Value |
 |---|---|
-| Brier score | **0.0575** |
-| Baseline (quote the base rate) | 0.0923 |
-| **Brier skill** | **+0.377** |
-| AUC | 0.885 |
+| Brier score | **0.0899** |
+| Baseline (quote the base rate) | 0.1203 |
+| **Brier skill** | **+0.253** |
+| AUC | 0.817 |
 
 The number that matters operationally is the review budget:
 
 | Review the riskiest… | Catch this share of escalations | Lift |
 |---|---|---|
-| **10% of batches** | **67%** | **6.7×** |
-| 20% | 73% | 3.7× |
-| 30% | 82% | 2.7× |
+| **10% of batches** | **42%** | **4.2×** |
+| 20% | 60% | 3.0× |
+| 30% | 70% | 2.3× |
 
 ```bash
 python -m taper.cli risk
 ```
 
-#### The model that shipped has no dependencies — and that was a measurement
+#### The backend choice was re-measured, and it flipped
 
-Gradient boosting was the obvious first choice. It never earned its place:
+Gradient boosting was the obvious first choice. Measured, it lost — a
+standardised logistic regression matched or beat it, so the shipped model
+needed no dependency at all.
 
-| Backend | Batches | AUC | Brier | Skill |
-|---|---|---|---|---|
-| **logistic (no deps)** | 20 | **0.914** | **0.0555** | **+0.446** |
-| sklearn GBM | 20 | 0.851 | 0.0577 | +0.425 |
-| **logistic (no deps)** | 40 | 0.885 | 0.0575 | +0.377 |
-| sklearn GBM | 40 | 0.883 | **0.0569** | **+0.384** |
+Then chargeback holds entered the data. Deductions began interacting with batch
+size in a way a linear model cannot express, and re-running the same comparison
+reversed the answer:
 
-At the smaller sample the logistic regression wins clearly. At the larger one
-they are **within noise of each other** — GBM takes Brier skill by 0.007,
-logistic takes AUC by 0.002, and neither gap means anything.
+| Backend | AUC | Brier | Skill |
+|---|---|---|---|
+| logistic (no deps) | 0.794 | 0.1003 | +0.166 |
+| **sklearn GradientBoosting** | **0.817** | **0.0899** | **+0.253** |
 
-So the honest conclusion is not "the simple model won." It is that **the two are
-equivalent, and one of them costs a dependency.** The signal here is close to
-linear in a couple of strong features, so the extra capacity buys variance
-rather than accuracy on a few hundred rows. The shipped model is a ~40-line
-logistic regression trained by gradient descent, and scikit-learn is an optional
-extra kept only to reproduce the comparison:
+So gradient boosting became the default. **That the comparison was re-run when
+the data changed matters more than which way it landed** — and it is why the
+command stayed in the CLI rather than being deleted once it had made its point:
 
 ```bash
 python -m taper.cli risk --compare
 ```
+
+scikit-learn leads but is never *required*. With the import blocked the logistic
+model takes over, the whole pipeline still runs, and the evaluation names the
+backend it used instead of quietly degrading. A test asserts exactly that.
 
 Isotonic calibration is likewise hand-implemented — pool-adjacent-violators is
 about thirty lines, so the part carrying the guarantee is in the repo rather
 than imported. A test blocks the `sklearn` import and asserts the default path
 never touches it.
 
-One honest limitation: `settlement_has_utr` and `closest_amount_gap_log` carry
-over half the model's weight. This is a model that learned two strong signals
-plus some texture, not a deep insight — and the feature importances print with
-every run so nobody has to take that on trust.
+Two honest limitations. A handful of features carry most of the weight — this
+learned a few strong signals plus some texture, not a deep insight, and the
+importances print with every run so nobody takes that on trust. And the numbers
+above are **weaker than an earlier version of this README claimed**, because the
+world got harder when holds and unpaid revenue were added; the old figures were
+measured on a simpler problem and are not comparable.
 
 ### Failure boundary — where it breaks, and which way
 
@@ -426,16 +430,16 @@ that the engine fails the first way. This is the test of that bet:
 
 | Level | Ambiguity | Spacing | Precision | Recall | Match | Exceptions | False findings |
 |---|---|---|---|---|---|---|---|
-| baseline | 1.0× | 2 | **1.000** | 0.898 | 65.6% | 12 | **0** |
-| mild | 1.5× | 2 | **1.000** | 0.851 | 63.9% | 19 | **0** |
-| moderate | 2.5× | 1 | **1.000** | 0.730 | 69.2% | 38 | **0** |
-| heavy | 4.0× | 1 | **1.000** | 0.639 | 76.0% | 58 | **0** |
-| severe | 6.0× | 0 | **1.000** | 0.409 | 66.7% | 113 | **0** |
-| absurd | 6.6× | 0 | **1.000** | 0.411 | **0.0%** | 120 | **0** |
+| baseline | 1.0× | 2 | **1.000** | 0.925 | 67.4% | 12 | **0** |
+| mild | 1.5× | 2 | **1.000** | 0.867 | 65.6% | 18 | **0** |
+| moderate | 2.5× | 1 | **1.000** | 0.790 | 71.9% | 35 | **0** |
+| heavy | 4.0× | 1 | **1.000** | 0.662 | 77.3% | 61 | **0** |
+| severe | 6.0× | 0 | **1.000** | 0.456 | 80.0% | 112 | **0** |
+| absurd | 6.6× | 0 | **1.000** | 0.414 | **0.0%** | 120 | **0** |
 
 **Fail-safe across the entire ladder.** Precision never leaves 1.000 — zero
 false findings at any level. At the top rung the engine matches *nothing* and
-escalates all 120 batches: it gives up rather than guesses.
+escalates every one of the ~120 batches: it gives up rather than guesses.
 
 The two knobs attack the fallback path specifically rather than adding noise the
 engine already handles. `ambiguity` scales the defect rates that strip
