@@ -1,0 +1,69 @@
+name: Model evaluation
+
+# Manual only. Running layer 3 against a real model costs money, so this never
+# fires on push. Trigger it from the Actions tab when you need fresh numbers
+# for the writeup - the figures in the README must come from this job, not from
+# the offline mock that regular CI uses.
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Held-out seed to evaluate"
+        default: "99"
+      months:
+        description: "Campaign length"
+        default: "5"
+
+jobs:
+  evaluate:
+    name: real-model ablation and campaign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Check the key is configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set."
+            echo "Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Ablation against a real model
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m taper.cli ablate --seed "${{ inputs.seed }}"
+
+      - name: Rule-growth campaign against a real model
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m taper.cli campaign \
+            --months "${{ inputs.months }}" --average-runs 1
+
+      - name: Close report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m taper.cli report \
+            --seed "${{ inputs.seed }}" --months "${{ inputs.months }}" \
+            --average-runs 1 --out reports/close-report.html
+
+      - name: Upload close report
+        uses: actions/upload-artifact@v4
+        with:
+          name: close-report
+          path: reports/close-report.html
+          retention-days: 30
