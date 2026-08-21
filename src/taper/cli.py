@@ -251,6 +251,44 @@ def cmd_campaign(args) -> None:
     print(BAR)
 
 
+def cmd_report(args) -> None:
+    """Write the close package a controller would actually receive."""
+    from pathlib import Path
+
+    from .campaign import run_campaign_averaged
+    from .engine.rules import RuleStore
+    from .report import render
+
+    _warn_mock(args)
+    cfg, client_name = _client_and_config(args)
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    store = RuleStore()
+    result = reconcile(case.bundle, store=store, config=cfg)
+    card = score(case, result, client_name)
+
+    rows = None
+    if not args.no_campaign:
+        print("  computing the taper curve ...", flush=True)
+        rows = run_campaign_averaged(
+            runs=args.average_runs, months=args.months,
+            n_batches=args.batches, config=cfg,
+        )
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        render(result, card, case, case.bundle.period, rows), encoding="utf-8"
+    )
+
+    print(BAR)
+    print(f"  close report written -> {out.resolve()}")
+    print(f"  {out.stat().st_size / 1024:.0f} KB, self-contained, no external assets")
+    print(f"  match rate {card.match_rate:.1%} · precision {card.precision:.3f} · "
+          f"{card.exceptions} exception(s)")
+    print(BAR)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="taper", description=__doc__)
     p.add_argument("--mock", action="store_true",
@@ -275,6 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--average-runs", type=int, default=8,
                    help="independent campaigns to average over (1 = single run only)")
     c.set_defaults(func=cmd_campaign)
+
+    rp = sub.add_parser("report", help="write the HTML close package")
+    rp.add_argument("--seed", type=int, default=99)
+    rp.add_argument("--out", default="reports/close-report.html")
+    rp.add_argument("--months", type=int, default=5)
+    rp.add_argument("--average-runs", type=int, default=8)
+    rp.add_argument("--no-campaign", action="store_true",
+                    help="skip the taper curve (much faster)")
+    rp.set_defaults(func=cmd_report)
 
     e = sub.add_parser("evaluate", help="tuning set vs held-out set")
     e.add_argument("--tune-seed", type=int, default=7)

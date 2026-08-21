@@ -33,3 +33,4 @@ data/rules.json
 *.swp
 .DS_Store
 Thumbs.db
+reports/
