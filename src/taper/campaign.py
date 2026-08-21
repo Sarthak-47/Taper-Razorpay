@@ -22,7 +22,7 @@ from .engine.llm import LLMClient
 from .engine.pipeline import RunConfig, reconcile
 from .engine.results import Exception_, ReconResult
 from .engine.rules import Rule, RuleStore, build_history, next_rule_id
-from .generator import DefectRates, GeneratedCase, generate
+from .generator import METHOD_RATES, DefectRates, GeneratedCase, generate
 from .metrics.harness import Scorecard, score
 from .models import DefectClass, Money
 
@@ -53,6 +53,10 @@ class HumanOracle:
         if alias:
             return alias
 
+        rate_card = self._confirm_rate_card(exc)
+        if rate_card:
+            return rate_card
+
         lag = self._spot_timing_lag(exc)
         if lag:
             return lag
@@ -81,6 +85,33 @@ class HumanOracle:
                 },
             }
         return {"defect_class": truths[0].defect_class.value, "proposed_rule": None}
+
+    def _confirm_rate_card(self, exc: Exception_) -> dict[str, Any] | None:
+        """Answer "what is this method actually contracted at?" from the rate card.
+
+        This is the one exception a human can settle without investigating
+        anything - they look it up in the merchant agreement. It is also the
+        purest case for the rule store: a contracted rate is a fact that does
+        not change month to month, so asking twice is pure waste.
+
+        The oracle confirms the *true* rate rather than the observed one. A human
+        reading a contract would not ratify whatever the PG happened to bill; if
+        the two disagree, that is an overcharge to pursue, not a rate to adopt.
+        """
+        if exc.kind != "unknown_rate_card":
+            return None
+        method = str(exc.context.get("method", ""))
+        true_rate = METHOD_RATES.get(method)
+        if true_rate is None:
+            return None
+        return {
+            "defect_class": None,
+            "proposed_rule": {
+                "kind": "fee_variant",
+                "params": {"method": method, "rate": str(true_rate)},
+                "confidence": 1.0,
+            },
+        }
 
     def _spot_timing_lag(self, exc: Exception_) -> dict[str, Any] | None:
         """Find the batch's money sitting just outside the settlement window.
@@ -332,7 +363,7 @@ def _learn_from_reviews(
         # of one lesson, not ten lessons.
         fingerprint = (
             f"{proposal.get('kind')}:"
-            f"{params.get('keyword') or params.get('marker') or params.get('bank')}"
+            f"{params.get('keyword') or params.get('marker') or params.get('bank') or params.get('method')}"
         )
         if fingerprint in seen:
             continue
@@ -343,6 +374,7 @@ def _learn_from_reviews(
             and r.params.get("keyword") == params.get("keyword")
             and r.params.get("marker") == params.get("marker")
             and r.params.get("bank") == params.get("bank")
+            and r.params.get("method") == params.get("method")
             for r in store.rules
         ):
             continue  # already known
