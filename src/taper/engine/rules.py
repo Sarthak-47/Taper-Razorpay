@@ -28,6 +28,41 @@ from typing import Any, Literal
 
 RuleKind = Literal["bank_timing", "narration_alias", "fee_variant", "adjustment_pattern"]
 
+# Longest reference token we will lift out of a narration. Bank references are
+# 8-24 digits; anything longer is a parse gone wrong, not a reference.
+MAX_REF_DIGITS = 24
+
+
+def _alias_extract(params: dict[str, Any], narration: str) -> str | None:
+    """Lift a settlement reference out of a narration, by marker and prefix.
+
+    Deliberately *not* a learned regex. The model names a marker token and a
+    prefix; this function does the extraction with fixed code. A rule store that
+    accepted model-authored patterns would be executing text the model wrote
+    against every future narration - an injection surface for no benefit, since
+    every real case is "find the label, take the number after it".
+    """
+    marker = str(params.get("marker", "")).upper().strip()
+    if not marker:
+        return None
+    text = narration.upper()
+    idx = text.find(marker)
+    if idx < 0:
+        return None
+
+    rest = text[idx + len(marker):].lstrip(" :-/#")
+    digits = ""
+    for ch in rest:
+        if ch.isdigit():
+            digits += ch
+            if len(digits) > MAX_REF_DIGITS:
+                return None
+        else:
+            break
+    if len(digits) < 6:
+        return None
+    return f"{params.get('prefix', '')}{digits}"
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -51,9 +86,7 @@ class Rule:
         if self.kind == "bank_timing":
             return context.get("bank") == self.params.get("bank")
         if self.kind == "narration_alias":
-            return self.params.get("pattern", "").upper() in str(
-                context.get("narration", "")
-            ).upper()
+            return _alias_extract(self.params, str(context.get("narration", ""))) is not None
         if self.kind == "fee_variant":
             return context.get("method") == self.params.get("method")
         if self.kind == "adjustment_pattern":
@@ -67,7 +100,7 @@ class Rule:
         if self.kind == "bank_timing":
             return {"expected_offset_days": self.params["offset_days"]}
         if self.kind == "narration_alias":
-            return {"utr": self.params.get("utr")}
+            return {"utr": _alias_extract(self.params, str(context.get("narration", "")))}
         if self.kind == "fee_variant":
             return {"rate": self.params["rate"]}
         if self.kind == "adjustment_pattern":
@@ -223,7 +256,7 @@ def rule_from_proposal(
     params = proposal.get("params") or {}
     required = {
         "bank_timing": {"bank", "offset_days"},
-        "narration_alias": {"pattern", "utr"},
+        "narration_alias": {"marker", "prefix"},
         "fee_variant": {"method", "rate"},
         "adjustment_pattern": {"keyword", "category"},
     }
