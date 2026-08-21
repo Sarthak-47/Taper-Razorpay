@@ -48,6 +48,13 @@ class BankProfile:
     name: str
     settle_offset_days: int
     narration_template: str
+    # Some banks never write the "UTR" token at all - they quote the same
+    # reference under their own label ("REF", "RRN", "TXN"). The strict
+    # narration regex cannot match those, and deliberately does not try: a
+    # loose pattern would produce confident wrong joins on every other bank.
+    # The correspondence is obvious to a human looking at one example, which
+    # makes it exactly the kind of thing worth learning once.
+    ref_style: bool = False
     # A recurring deduction the bank takes off every payout. Absent from the
     # PG settlement report, so it always shows up as an unexplained shortfall
     # until somebody works out what it is - the archetypal learnable exception.
@@ -65,6 +72,10 @@ BANK_PROFILES = [
     BankProfile(
         "SBI", 3, "RTGS RCVD FRM RAZORPAY SOFTWARE UTR {utr} SVC CHG",
         adjustment_amount=Money("500.00"), adjustment_keyword="SVC CHG",
+    ),
+    BankProfile(
+        "KOTAK", 2, "KKBK NEFT REF {ref} RAZORPAY SOFTWARE SETTLEMENT",
+        ref_style=True,
     ),
 ]
 
@@ -331,7 +342,9 @@ def generate(
             clean_utr = None
             defects.append(InjectedDefect(DefectClass.NARRATION_DRIFT, batch_id, {"true_utr": utr}))
         else:
-            narration = profile.narration_template.format(utr=utr, bank=bank_name)
+            narration = profile.narration_template.format(
+                utr=utr, bank=bank_name, ref=utr.removeprefix("UTR")
+            )
             # Even when the narration carries the UTR, the bank only populates
             # the structured field about half the time.
             clean_utr = utr if rng.random() < 0.55 else None
