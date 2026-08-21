@@ -13,7 +13,7 @@ regression fitted on a held-out split.
 violators is about thirty lines, and the shipped model is a logistic regression
 trained by gradient descent. scikit-learn is an optional extra used only to
 reproduce the comparison that led to this choice - gradient boosting was tried
-first and measured worse on both ranking and calibration.
+first and never measured better than the dependency-free model.
 """
 
 from __future__ import annotations
@@ -96,8 +96,9 @@ class LogisticModel:
     """Plain logistic regression by gradient descent, with L2 and standardisation.
 
     This is the *shipped* model, not a consolation prize. Gradient boosting was
-    tried first and lost on this problem - worse ranking and worse calibration -
-    so the default is the one with no dependencies. See ``taper risk --compare``.
+    tried first and never earned its place: clearly behind on the smaller sample
+    and within noise on the larger one. When two options measure the same, the
+    one that costs a dependency loses. See ``taper risk --compare``.
     """
 
     weights: list[float] = field(default_factory=list)
@@ -231,17 +232,17 @@ class ExceptionRiskModel:
 
 
 def _make_model(seed: int, prefer: str = "logistic") -> tuple[object, bool]:
-    """Build the underlying model. Logistic is the default because it measured better.
+    """Build the underlying model. Logistic is the default because it measured no worse.
 
-    Gradient boosting was the obvious first choice and lost on this problem -
-    worse ranking *and* worse calibration than a standardised logistic
-    regression (see ``taper risk --compare``). The signal here is close to
+    Gradient boosting was the obvious first choice. On a 20-batch sample the
+    standardised logistic regression beat it outright (AUC 0.914 vs 0.851); at
+    40 batches the two are within noise of each other. The signal is close to
     linear in a couple of strong features, so the extra capacity buys variance
     rather than accuracy on a few hundred rows.
 
-    So the shipped model is the one with no dependencies, and that is a
-    measurement rather than a preference. Pass ``prefer="gbm"`` to reproduce the
-    comparison.
+    The decision is therefore not "the simple model won" but "they are
+    equivalent and one costs a dependency". Pass ``prefer="gbm"`` to reproduce
+    the comparison.
     """
     if prefer == "gbm":
         try:

@@ -307,11 +307,12 @@ def cmd_risk(args) -> None:
             _, cr = train_and_evaluate(n_batches=args.batches, seed=args.seed, prefer=pref)
             print(f"  {cr.backend:<44}{cr.auc:>8.3f}{cr.brier_model:>10.4f}{cr.skill:>+9.3f}")
         print()
-        print("  Gradient boosting was the obvious first choice and lost on both")
-        print("  ranking and calibration. The signal is close to linear in a couple")
-        print("  of strong features, so the extra capacity buys variance rather than")
-        print("  accuracy on a few hundred rows. The shipped model needs no")
-        print("  dependencies, and that is a measurement rather than a preference.")
+        print("  Gradient boosting was the obvious first choice and never earned its")
+        print("  place: clearly behind on a 20-batch sample, within noise at 40. The")
+        print("  signal is close to linear in a couple of strong features, so the extra")
+        print("  capacity buys variance rather than accuracy on a few hundred rows.")
+        print("  The conclusion is not that the simple model won - it is that the two")
+        print("  are equivalent, and one of them costs a dependency.")
         print(BAR)
         return
 

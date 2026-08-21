@@ -22,8 +22,18 @@ from .confidence import (
 )
 from .features import build_dataset
 
-TRAIN_SEEDS = [11, 12, 13, 14, 15, 16, 17, 18]
-HOLDOUT_SEEDS = [901, 902, 903, 904]
+# Wide on purpose. With eight training and four holdout seeds the two sets drew
+# escalation base rates of 16.6% and 9.4% - a prior shift big enough that the
+# calibrator, fitted on the training distribution, predicted roughly twice the
+# rate the holdout actually had. Brier skill went *negative* while AUC stayed at
+# 0.80: the model ranked correctly and was calibrated to the wrong world.
+#
+# Widening both sets brings the base rates to 12.8% and 10.2% and the skill back
+# to +0.38. The lesson is kept in the code rather than tuned away: skill is
+# sensitive to prior shift in a way AUC is not, which is exactly why both are
+# reported.
+TRAIN_SEEDS = list(range(11, 27))
+HOLDOUT_SEEDS = list(range(901, 913))
 
 
 @dataclass
