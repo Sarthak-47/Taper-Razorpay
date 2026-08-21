@@ -19,11 +19,19 @@ python -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"
 ```
 
 ```bash
-python -m taper.cli campaign --months 6 --average-runs 8
+python -m taper.cli doctor
 ```
 
-That one command reproduces the headline result. **No API key needed** — the
-deterministic layers and the offline mock have zero third-party dependencies.
+`doctor` reports what your machine can run and prints the exact command to type
+next — a local model if Ollama is up, an API key if one is set, otherwise the
+deterministic path. **Nothing is required.** The deterministic layers have zero
+third-party dependencies and reproduce most of what follows.
+
+Then the headline result:
+
+```bash
+python -m taper.cli campaign --months 6 --average-runs 8
+```
 
 | | Month 1 | Month 6 |
 |---|---|---|
@@ -40,6 +48,7 @@ Four more things worth thirty seconds each:
 | `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
 | `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
 | `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
+| `taper doctor` | What this machine can run, and the exact command to type next |
 | `taper --llm ollama reconcile` | Layer 3 against a **local model, no API key** — and an ablation that honestly reports it added nothing |
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
@@ -51,7 +60,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**89 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**100 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---

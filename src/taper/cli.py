@@ -412,6 +412,38 @@ def _risk_for_report(case, result, args) -> dict | None:
     }
 
 
+def cmd_doctor(args) -> None:
+    """Say what this machine can run, and exactly what to type next."""
+    from .diagnose import run
+
+    d = run()
+
+    print(BAR)
+    print("  DOCTOR - what this machine can run")
+    print(BAR)
+    for check in d.checks:
+        mark = "ok " if check.ok else ("MISSING" if check.required else "-  ")
+        print(f"  [{mark:>7}] {check.name:<26}{check.detail}")
+
+    if d.ollama_models and len(d.ollama_models) > 4:
+        print(f"\n  all local models: {', '.join(d.ollama_models)}")
+
+    print(f"\n  {'-' * 68}")
+    if d.blocked:
+        print("  Something required is missing - see the MISSING rows above.")
+        print(BAR)
+        return
+
+    print("  RUN THIS")
+    print(f"  {'-' * 68}")
+    print(f"    {d.recommended_command()}")
+    print(f"\n  {d.why()}")
+    print("\n  Nothing here is required. The deterministic layers reproduce most of")
+    print("  the README on their own, and every artifact records which resolver")
+    print("  produced it - so mock, local and hosted numbers can never be confused.")
+    print(BAR)
+
+
 def cmd_bench(args) -> None:
     """Throughput at volume, which is a stated bar and was never measured.
 
@@ -772,6 +804,10 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    doc = sub.add_parser("doctor", parents=[shared],
+                         help="what this machine can run, and what to type next")
+    doc.set_defaults(func=cmd_doctor)
 
     bn = sub.add_parser("bench", parents=[shared], help="throughput as the input grows")
     bn.add_argument("--seed", type=int, default=99)

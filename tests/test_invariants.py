@@ -1440,3 +1440,178 @@ def test_persisted_store_keeps_working_across_closes(tmp_path) -> None:
     assert with_store.match_rate >= without.match_rate, (
         "a reloaded store performed worse than no store at all"
     )
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the HTTP client actually speaks the protocol"
+# ---------------------------------------------------------------------------
+
+def _fake_provider(handler):
+    """Run a throwaway OpenAI-compatible server on a free port.
+
+    The HTTP success path had no coverage at all - only the unreachable case
+    was tested - so a change to headers, body shape or response parsing could
+    break every real provider and leave the suite green.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    captured: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib naming
+            length = int(self.headers.get("Content-Length", 0))
+            captured["path"] = self.path
+            captured["headers"] = dict(self.headers)
+            captured["body"] = _json.loads(self.rfile.read(length))
+            status, payload = handler(captured["body"])
+            body = _json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # silence the test output
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, captured
+
+
+def _chat_completion(content: str) -> tuple[int, dict]:
+    return 200, {"choices": [{"message": {"content": content}}]}
+
+
+def test_http_client_sends_and_parses_a_real_exchange() -> None:
+    import json as _json
+
+    from taper.engine.llm import SYSTEM_PROMPT, OpenAICompatibleClient
+    from taper.engine.results import Exception_
+
+    answer = {
+        "defect_class": "unrecorded_adjustment",
+        "bank_txn_ids": ["b1"],
+        "reasoning": "processing charge",
+        "confidence": 0.9,
+        "claimed_adjustment": "250.00",
+        "proposed_rule": None,
+    }
+    server, captured = _fake_provider(lambda body: _chat_completion(_json.dumps(answer)))
+    try:
+        port = server.server_address[1]
+        client = OpenAICompatibleClient(
+            base_url=f"http://127.0.0.1:{port}/v1", model="test-model", api_key="secret"
+        )
+        out = client.classify(
+            Exception_(subject_id="setl_1", kind="unmatched_batch", reason="x"),
+            {"candidates": [{"bank_txn_id": "b1", "amount": "100.00"}]},
+        )
+    finally:
+        server.shutdown()
+
+    assert out == answer
+
+    # The request has to be shaped the way every provider expects.
+    assert captured["path"].endswith("/chat/completions")
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    body = captured["body"]
+    assert body["model"] == "test-model"
+    assert body["temperature"] == 0, "decoding must be deterministic for a close"
+    assert body["messages"][0]["role"] == "system"
+    assert body["messages"][0]["content"] == SYSTEM_PROMPT
+    assert "setl_1" in body["messages"][1]["content"]
+
+
+def test_http_client_survives_a_chatty_or_broken_provider() -> None:
+    """Providers wrap JSON in prose or fences, and sometimes return nonsense."""
+    from taper.engine.llm import OpenAICompatibleClient
+    from taper.engine.results import Exception_
+
+    fenced = 'Sure!\n```json\n{"defect_class": "unknown", "bank_txn_ids": [], ' \
+             '"confidence": 0.3, "reasoning": "unclear", "proposed_rule": null}\n```'
+    for content, expected in ((fenced, "unknown"), ("not json at all", "unknown")):
+        server, _ = _fake_provider(lambda body, c=content: _chat_completion(c))
+        try:
+            port = server.server_address[1]
+            client = OpenAICompatibleClient(base_url=f"http://127.0.0.1:{port}/v1")
+            out = client.classify(
+                Exception_(subject_id="s", kind="unmatched_batch", reason="x"),
+                {"candidates": []},
+            )
+        finally:
+            server.shutdown()
+        assert out["defect_class"] == expected
+
+
+def test_http_client_handles_an_unexpected_response_shape() -> None:
+    """A 200 with the wrong body must not raise into the close."""
+    from taper.engine.llm import OpenAICompatibleClient
+    from taper.engine.results import Exception_
+
+    server, _ = _fake_provider(lambda body: (200, {"unexpected": "shape"}))
+    try:
+        port = server.server_address[1]
+        client = OpenAICompatibleClient(base_url=f"http://127.0.0.1:{port}/v1")
+        out = client.classify(
+            Exception_(subject_id="s", kind="unmatched_batch", reason="x"),
+            {"candidates": []},
+        )
+    finally:
+        server.shutdown()
+    assert out["defect_class"] == "unknown"
+    assert out["confidence"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the first minute after cloning is not a guessing game"
+# ---------------------------------------------------------------------------
+
+def test_doctor_never_crashes_on_a_bare_machine(monkeypatch) -> None:
+    """The command that explains a broken environment must not need one.
+
+    With no keys, no Ollama and no scikit-learn, `doctor` still has to run and
+    still has to recommend something that works - which is the deterministic
+    path, because it has no dependencies at all.
+    """
+    import taper.diagnose as diagnose
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setattr(diagnose, "_probe_ollama", lambda: (False, [], "not reachable"))
+
+    d = diagnose.run()
+    assert not d.blocked, "a machine with no providers must not be reported as blocked"
+    assert d.recommended_command().endswith("--no-llm reconcile --seed 99")
+    assert "deterministic" in d.why()
+
+
+def test_doctor_prefers_a_local_model_when_one_is_present(monkeypatch) -> None:
+    import taper.diagnose as diagnose
+
+    monkeypatch.setattr(
+        diagnose, "_probe_ollama",
+        lambda: (True, ["llama3.1:8b", "qwen2.5:14b", "qwen2.5:7b"], "3 models"),
+    )
+    d = diagnose.run()
+    # Mid-size instruct model: follows the schema, still answers promptly.
+    assert "--llm ollama --llm-model qwen2.5:14b" in d.recommended_command()
+    assert "costs nothing" in d.why()
+
+
+def test_doctor_recommends_a_command_that_actually_parses() -> None:
+    """A recommendation the CLI would reject is worse than none."""
+    import shlex
+
+    from taper.cli import main
+    from taper.diagnose import run
+
+    argv = shlex.split(run().recommended_command())
+    assert argv[:3] == ["python", "-m", "taper.cli"]
+    try:
+        main([*argv[3:], "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0, "the recommended command does not parse"
