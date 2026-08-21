@@ -26,9 +26,10 @@ dependencies = []
 # offline mock must run with zero third-party dependencies, so CI and any
 # reviewer without an API key can still execute the full pipeline.
 llm = ["anthropic>=0.40.0"]
-# Optional. The exception-risk model falls back to a dependency-free
-# logistic regression when scikit-learn is absent, so nothing breaks
-# without it - the evaluation simply reports the weaker backend.
+# Optional, and not needed to run anything. The shipped exception-risk model is
+# a dependency-free logistic regression; scikit-learn exists here only to
+# reproduce the backend comparison that led to that choice, via
+# `taper risk --compare`.
 ml = ["scikit-learn>=1.4"]
 dev = [
     "anthropic>=0.40.0",
