@@ -150,9 +150,78 @@ recall climbs to 0.94 once the rule store fills.
 Per-class precision and recall, calibration, false-positive cost in review-minutes,
 and the auto-clear operating point all print from `reconcile`.
 
-### Two bugs the harness caught, and what they cost
+### Exception-risk model — predicting the workload before the close
 
-Both were found by ground-truth scoring, not by reading the code:
+The layered engine tells a controller what went wrong *after* the work is done.
+The risk model tells them where the work will be *before* they start: for each
+settlement batch, the calibrated probability it will need a human.
+
+The target is deliberately not "is this finding correct" — the deterministic
+layers run at precision 1.000, so that label has one class and nothing to learn.
+What genuinely varies, and what a controller genuinely wants, is which batches
+land on their desk.
+
+**Calibration is the product, not accuracy.** Nobody acts on a ranking; they act
+on a threshold. That decision is only sound if a stated 0.8 means the batch
+really does escalate about 80% of the time. So the model is scored with Brier
+and a reliability curve, and every raw score passes through isotonic regression
+fitted on a split disjoint from the training rows.
+
+Trained on seeds `[11..18]`, evaluated on `[901..904]` — **never fitted on**, and
+`train_and_evaluate` raises if the two sets intersect:
+
+| Metric | Value |
+|---|---|
+| Brier score | **0.0616** |
+| Baseline (quote the base rate) | 0.1325 |
+| **Brier skill** | **+0.535** |
+| AUC | 0.895 |
+
+The number that matters operationally is the review budget:
+
+| Review the riskiest… | Catch this share of escalations | Lift |
+|---|---|---|
+| **10% of batches** | **60%** | **6.0×** |
+| 20% | 76% | 3.8× |
+| 30% | 80% | 2.7× |
+| 40% | 84% | 2.1× |
+
+```bash
+python -m taper.cli risk
+```
+
+#### The model that shipped has no dependencies — and that was a measurement
+
+Gradient boosting was the obvious first choice. It lost:
+
+| Backend | AUC | Brier | Skill |
+|---|---|---|---|
+| **logistic regression (no dependencies)** | **0.895** | **0.0616** | **+0.535** |
+| sklearn GradientBoostingClassifier | 0.847 | 0.0707 | +0.466 |
+
+Worse on ranking *and* worse on calibration. The signal here is close to linear
+in a couple of strong features, so the extra capacity buys variance rather than
+accuracy on a few hundred rows. So the shipped model is a ~40-line logistic
+regression trained by gradient descent, and scikit-learn is an optional extra
+kept only to reproduce the comparison:
+
+```bash
+python -m taper.cli risk --compare
+```
+
+Isotonic calibration is likewise hand-implemented — pool-adjacent-violators is
+about thirty lines, so the part carrying the guarantee is in the repo rather
+than imported. A test blocks the `sklearn` import and asserts the default path
+never touches it.
+
+One honest limitation: `settlement_has_utr` and `closest_amount_gap_log` carry
+over half the model's weight. This is a model that learned two strong signals
+plus some texture, not a deep insight — and the feature importances print with
+every run so nobody has to take that on trust.
+
+### Three bugs the harness caught, and what they cost
+
+All three were found by measurement, not by reading the code:
 
 1. **Duplicate captures were double-reported** as missing ledger entries — 20 false
    positives on one seed. A duplicate has no ledger entry *by definition*, so two
@@ -164,9 +233,18 @@ Both were found by ground-truth scoring, not by reading the code:
    from 1.000 to 0.966 *as the rule store grew*, which is the worst possible
    failure shape: the system got less trustworthy the more it learned.
 
+3. **Label noise crippled the risk model.** The first version attributed every
+   unclaimed bank credit back to any batch sharing its settlement window. That
+   looked like better coverage and was in fact noise — an orphan credit sits in
+   the window of several perfectly clean batches, so it marked them all as
+   needing review. About a fifth of the positive labels were batches that never
+   escalated. Fixing the *label* took **AUC 0.701 → 0.847** and Brier skill
+   **0.142 → 0.466**, without touching the model at all.
+
 The fix for the second one became a design rule — **a rule with no verdict on an
 item must leave the item alone** — and a test that fails if any month of a campaign
-drops below 1.000 precision.
+drops below 1.000 precision. The third is why the labelling logic now carries a
+comment spelling out what it must not do.
 
 ### Honest limitations
 
@@ -272,6 +350,10 @@ src/taper/
     llm.py             L3 client, prompt, and the propose-then-verify gate
     pipeline.py        layer orchestration
   metrics/harness.py   per-class scoring, calibration, ablation, FP cost
+  ml/
+    features.py        batch features from raw sources only - no matching outcome
+    confidence.py      logistic model + hand-rolled isotonic calibration
+    train.py           disjoint-seed training; raises on any train/holdout overlap
   cli.py               reconcile / ablate / evaluate
 tests/                 invariants that guard the claims above
 .github/workflows/     lint, test on 3.11-3.13, CLI smoke runs, metrics re-assertion

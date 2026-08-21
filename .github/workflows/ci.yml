@@ -51,6 +51,9 @@ jobs:
       - name: Smoke - rule-growth campaign
         run: python -m taper.cli --mock campaign --months 3 --average-runs 3
 
+      - name: Smoke - exception-risk model
+        run: python -m taper.cli risk --batches 20
+
   metrics:
     name: verify reported metrics
     runs-on: ubuntu-latest
