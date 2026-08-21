@@ -291,11 +291,14 @@ comment spelling out what it must not do.
 
 ### Honest limitations
 
-- **Combined defects defeat the deterministic solver.** A batch that is *both*
-  split across two credits *and* short by an unrecorded adjustment satisfies
-  neither the exact-sum nor the subset path. These are the bulk of the remaining
-  exceptions. `verify_proposal` also does not yet verify a combined claim, so the
-  model cannot currently resolve them either.
+- **Combined defects are resolved, but only once the charge is known.** A batch
+  both split across credits *and* short by a deduction is now handled at layer 1
+  via candidate-target subset netting, and layer 3 may name a `claimed_adjustment`
+  the report does not show. Either way the arithmetic must close *exactly* on
+  that number — a deduction larger than the payout, or one leaving any residual,
+  is refused, because a free parameter big enough to reconcile anything explains
+  nothing. What remains unresolved is a first-month combined defect on a bank
+  whose charge nobody has explained yet and whose amount the model cannot infer.
 - **Subset netting is capped** at 3 credits and a 12-credit window. Unbounded
   subset-sum is exponential and would hang the run; a bounded search that routes
   overflow to the exception list is strictly better than a solver that stalls.
@@ -423,7 +426,6 @@ All four layers are wired, and three of the four rule types learn end to end
 batch both split across credits *and* short by a recurring charge — now resolve
 deterministically via candidate-target subset netting.
 
-Remaining work: real-model evaluation runs (everything to date is either
-deterministic or against the offline mock), `fee_variant` rule learning, and
-`verify_proposal` support for combined claims so layer 3 can resolve the same
-shapes layer 1 now handles.
+Remaining work: real-model evaluation runs — everything to date is either
+deterministic or against the offline mock — and `fee_variant` rule learning,
+the one rule type still unproposed.

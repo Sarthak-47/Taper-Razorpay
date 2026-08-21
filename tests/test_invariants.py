@@ -544,3 +544,56 @@ def test_report_renders_the_risk_section_when_given_one() -> None:
     assert "Where the work will be" in html
     assert "setl_99_001" in html
     assert "https://" not in html.replace('xmlns="http://www.w3.org/2000/svg"', "")
+
+
+# ---------------------------------------------------------------------------
+# Claim: "a combined split-and-shortfall claim is verified, not waved through"
+# ---------------------------------------------------------------------------
+
+def test_combined_claim_accepted_only_when_arithmetic_closes() -> None:
+    """Credits short of the payout by exactly the claimed deduction."""
+    proposal = {
+        "defect_class": "split_settlement",
+        "bank_txn_ids": ["b1", "b2"],
+        "claimed_adjustment": "250.00",
+        "confidence": 0.8,
+    }
+    credits = {"b1": Money("2000.00"), "b2": Money("2750.00")}
+    v = verify_proposal(proposal, Money("5000.00"), credits)
+    assert v.ok, v.reason
+
+
+def test_combined_claim_rejected_when_a_residual_remains() -> None:
+    """A deduction that only partly explains the gap explains nothing."""
+    proposal = {
+        "defect_class": "split_settlement",
+        "bank_txn_ids": ["b1"],
+        "claimed_adjustment": "100.00",
+        "confidence": 0.95,
+    }
+    v = verify_proposal(proposal, Money("5000.00"), {"b1": Money("4000.00")})
+    assert not v.ok and "unexplained" in v.reason
+
+
+def test_claimed_adjustment_cannot_be_a_free_parameter() -> None:
+    """A deduction bigger than the payout would reconcile literally anything."""
+    proposal = {
+        "defect_class": "split_settlement",
+        "bank_txn_ids": ["b1"],
+        "claimed_adjustment": "999999.00",
+        "confidence": 0.99,
+    }
+    v = verify_proposal(proposal, Money("5000.00"), {"b1": Money("100.00")})
+    assert not v.ok and "exceeds" in v.reason
+
+
+def test_claimed_adjustment_must_be_a_positive_number() -> None:
+    for bad in ("-50.00", "0", "not-a-number"):
+        proposal = {
+            "defect_class": "split_settlement",
+            "bank_txn_ids": ["b1"],
+            "claimed_adjustment": bad,
+            "confidence": 0.9,
+        }
+        v = verify_proposal(proposal, Money("5000.00"), {"b1": Money("4000.00")})
+        assert not v.ok, f"accepted claimed_adjustment={bad!r}"

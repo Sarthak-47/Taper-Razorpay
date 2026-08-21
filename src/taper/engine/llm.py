@@ -47,6 +47,13 @@ Return STRICT JSON, no prose, with these keys:
   bank_txn_ids   list of bank credit ids you believe pay this batch (may be empty)
   reasoning      one short sentence
   confidence     0.0-1.0, calibrated: use <0.7 when genuinely unsure
+  claimed_adjustment
+                 null, or a positive amount you believe the bank deducted and the
+                 settlement report does not show. Use this when the credits you
+                 named are short of the expected payout by a consistent amount
+                 (a processing or service charge). The system verifies that the
+                 sums close exactly with your number, so a guess that is merely
+                 close will be rejected - omit it rather than approximate.
   proposed_rule  null, or an object {kind, params, confidence} where kind is one of
                  bank_timing {bank, offset_days}
                  narration_alias {pattern, utr}
@@ -206,6 +213,41 @@ def verify_proposal(
     delta = expected_net - credited
 
     claimed = str(proposal.get("defect_class", "")).lower()
+
+    # A batch can be split across credits *and* short by a charge at the same
+    # time. Layer 1 resolves those deterministically when the charge is already
+    # known; when it is not, the model may name the shortfall it believes is
+    # there. The claim is only accepted if the arithmetic closes exactly with
+    # that number - the model supplies a candidate, it never supplies a fudge.
+    claimed_adj = proposal.get("claimed_adjustment")
+    if claimed_adj is not None:
+        try:
+            adjustment = Money(str(claimed_adj))
+        except (InvalidOperation, ValueError, TypeError):
+            return Verification(False, f"claimed_adjustment {claimed_adj!r} is not a number")
+        if adjustment <= 0:
+            return Verification(False, "claimed adjustment must be a positive deduction")
+        if adjustment > credited:
+            # A deduction larger than the payout is not an explanation, it is a
+            # free parameter big enough to reconcile anything.
+            return Verification(
+                False, f"claimed adjustment {adjustment} exceeds the credited amount"
+            )
+        residual = delta - adjustment
+        if abs(residual) <= AMOUNT_TOLERANCE:
+            return Verification(
+                True,
+                f"credits sum to expected net less a claimed {adjustment} deduction",
+                credited,
+                delta,
+            )
+        return Verification(
+            False,
+            f"claimed adjustment {adjustment} leaves {residual} unexplained",
+            credited,
+            delta,
+        )
+
     if claimed == "split_settlement":
         # A split must actually reconcile to the batch total. No tolerance for
         # "close enough" - that is how a wrong pairing gets waved through.
