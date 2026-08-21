@@ -730,3 +730,63 @@ def test_learned_rate_card_still_catches_overcharges_on_that_method() -> None:
     assert [f.subject_id for f in findings] == ["pay_bad"], (
         "the one row above the contracted rate must still be flagged"
     )
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the report shows the working, not just the conclusion"
+# ---------------------------------------------------------------------------
+
+def _rendered(seed: int = 99, store=None) -> str:
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=20, seed=seed)
+    result = reconcile(case.bundle, store=store, config=RunConfig(use_llm=True),
+                       client=MockClient())
+    return render(result, _score(case, result, "mock"), case, "2026-06", None, None, store)
+
+
+def test_report_carries_the_audit_trail() -> None:
+    """A controller signs off on being able to see how a number was reached.
+
+    Match rate alone is not a close package: the per-batch working, the
+    evidence behind the largest findings, and the money split by what it
+    actually means all have to be on the page.
+    """
+    html = _rendered()
+    for section in (
+        "Money found",
+        "What the system has learned",
+        "Reconciliation detail",
+        "Receipts",
+        "Exception list",
+    ):
+        assert section in html, f"report is missing the {section!r} section"
+
+    # The working: batch, what paid it, and which layer matched it.
+    assert "Matched by" in html and "utr_join" in html
+    # Money is split by meaning, not left as one number.
+    assert "What it means" in html and "Recoverable from the gateway" in html
+
+
+def test_report_money_total_matches_the_findings() -> None:
+    """The headline rupee figure must equal the sum of what produced it."""
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import money_section
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    card = _score(case, result, "mock")
+
+    section = money_section(result)
+    assert f"Rs.{card.money_flagged:,.0f}" in section, (
+        "the money table total disagrees with the scorecard"
+    )
+
+
+def test_report_states_when_nothing_has_been_learned() -> None:
+    """A cold start must say so rather than showing an empty table."""
+    html = _rendered(store=None)
+    assert "cold start" in html.lower()
