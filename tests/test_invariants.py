@@ -1359,3 +1359,84 @@ def test_a_failing_classification_does_not_abort_the_close() -> None:
     assert "classification failed" in out[1]["reasoning"]
     assert out[1]["confidence"] == 0.0
     assert out[0]["reasoning"] == "fine" and out[2]["reasoning"] == "fine"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "a persisted rule store survives a round trip intact"
+# ---------------------------------------------------------------------------
+
+def test_saving_a_store_preserves_retirements(tmp_path) -> None:
+    """Losing retirements corrupts ids, not just history.
+
+    Rule ids are allocated by counting live *and* retired rules of a kind. A
+    store that forgets its retirements on reload reissues an id a live rule
+    already holds - so the replacement and the thing it replaced become
+    indistinguishable in exactly the trail someone needs to follow.
+    """
+    from taper.engine.rules import Rule, RuleStore, next_rule_id
+
+    path = tmp_path / "rules.json"
+    store = RuleStore(path)
+    store.rules.append(
+        Rule("adjustment_pattern_001", "adjustment_pattern",
+             {"keyword": "PROC CHG", "amount": "250.00"}, "x", "2026-01-01")
+    )
+    store.retire("adjustment_pattern_001", "bank repriced")
+    store.rules.append(
+        Rule("adjustment_pattern_002", "adjustment_pattern",
+             {"keyword": "PROC CHG", "amount": "375.00"}, "y", "2026-04-01")
+    )
+    store.save()
+
+    reloaded = RuleStore(path)
+    assert [r.rule_id for r in reloaded.rules] == ["adjustment_pattern_002"]
+    assert [r.rule_id for r, _ in reloaded.retired] == ["adjustment_pattern_001"]
+    assert reloaded.retired[0][1] == "bank repriced"
+
+    issued = next_rule_id(reloaded, "adjustment_pattern")
+    assert issued == "adjustment_pattern_003", f"reissued a live id: {issued}"
+    live = {r.rule_id for r in reloaded.rules}
+    assert issued not in live
+
+
+def test_store_still_reads_the_pre_versioning_format(tmp_path) -> None:
+    """An existing store on disk must keep loading after the format change."""
+    import json
+
+    from taper.engine.rules import RuleStore
+
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps([{
+        "rule_id": "fee_variant_001", "kind": "fee_variant",
+        "params": {"method": "intl_card", "rate": "0.03"},
+        "origin_exception": "ratecard::intl_card", "learned_on": "2026-01-01",
+        "confidence": 0.9,
+    }]), encoding="utf-8")
+
+    store = RuleStore(path)
+    assert len(store) == 1
+    assert store.rules[0].params["rate"] == "0.03"
+    assert store.retired == []
+
+
+def test_persisted_store_keeps_working_across_closes(tmp_path) -> None:
+    """End to end: learn, save, reload, and still resolve with what was learned."""
+    from taper.campaign import run_campaign
+    from taper.engine.rules import RuleStore
+
+    run = run_campaign(months=4)
+    path = tmp_path / "rules.json"
+    saved = RuleStore(path)
+    saved.rules = list(run.store.rules)
+    saved.retired = list(run.store.retired)
+    saved.save()
+
+    reloaded = RuleStore(path)
+    assert len(reloaded) == len(run.store)
+
+    case = generate(n_batches=40, seed=99)
+    with_store = reconcile(case.bundle, store=reloaded, config=RunConfig(use_llm=False))
+    without = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    assert with_store.match_rate >= without.match_rate, (
+        "a reloaded store performed worse than no store at all"
+    )

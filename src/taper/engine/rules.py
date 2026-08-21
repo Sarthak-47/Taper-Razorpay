@@ -32,6 +32,10 @@ RuleKind = Literal["bank_timing", "narration_alias", "fee_variant", "adjustment_
 # 8-24 digits; anything longer is a parse gone wrong, not a reference.
 MAX_REF_DIGITS = 24
 
+# Bumped when the on-disk shape changes. The reader still accepts the original
+# bare-list format, so an existing store keeps loading.
+STORE_FORMAT_VERSION = 2
+
 
 def _alias_extract(params: dict[str, Any], narration: str) -> str | None:
     """Lift a settlement reference out of a narration, by marker and prefix.
@@ -210,18 +214,49 @@ class RuleStore:
 
     # ---- persistence ----------------------------------------------------
     def save(self) -> None:
+        """Persist the whole store, retirements included.
+
+        Writing only the live rules loses more than history. Rule ids are
+        allocated by counting live *and* retired rules of a kind, so a store
+        that forgets its retirements reissues an id that a live rule already
+        holds - and every provenance trail through the two becomes ambiguous.
+        A round-trip test guards exactly that.
+        """
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
-            json.dumps([asdict(r) for r in self.rules], indent=2), encoding="utf-8"
+            json.dumps(
+                {
+                    "version": STORE_FORMAT_VERSION,
+                    "rules": [asdict(r) for r in self.rules],
+                    "retired": [
+                        {"rule": asdict(r), "reason": reason} for r, reason in self.retired
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
         )
 
     def load(self) -> None:
         if not self.path or not self.path.exists():
             return
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.rules = [Rule(**r) for r in data]
+
+        # A bare list is the pre-versioning format, which had no retirements.
+        # Reading it still works; it just starts with an empty retired list.
+        if isinstance(data, list):
+            self.rules = [Rule(**r) for r in data]
+            self.retired = []
+            return
+
+        self.rules = [Rule(**r) for r in data.get("rules", [])]
+        self.retired = [
+            (Rule(**entry["rule"]), entry.get("reason", ""))
+            for entry in data.get("retired", [])
+            if isinstance(entry, dict) and "rule" in entry
+        ]
 
     def __len__(self) -> int:
         return len(self.rules)
