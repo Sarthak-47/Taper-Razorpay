@@ -995,3 +995,115 @@ def test_no_generated_narration_trips_the_scanner(seed: int) -> None:
     case = generate(n_batches=40, seed=seed)
     noisy = [c for c in case.bundle.bank if sanitize.scan(c.narration)]
     assert not noisy, f"{len(noisy)} ordinary narration(s) flagged as injection"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "it reconciles files, not only data it invented"
+# ---------------------------------------------------------------------------
+
+def test_csv_round_trip_reproduces_the_close_exactly(tmp_path) -> None:
+    """Export a period, read it back, and reach the identical close.
+
+    This is the difference between a tool and a simulation. If the CSV path
+    lost a field, dropped precision on an amount, or reordered anything that
+    matters, the digest would diverge and this would fail.
+    """
+    from taper.attest import attest
+    from taper.io import load_bundle, write_bundle
+
+    case = generate(n_batches=25, seed=99)
+    in_memory = reconcile(case.bundle, config=RunConfig(use_llm=False))
+
+    paths = write_bundle(case.bundle, tmp_path)
+    loaded, reports = load_bundle(paths["settlement"], paths["bank"], paths["ledger"])
+    assert all(r.ok for r in reports.values()), "clean export failed to load"
+
+    from_disk = reconcile(loaded, config=RunConfig(use_llm=False))
+    assert attest(from_disk).digest == attest(in_memory).digest
+
+
+def test_loader_accepts_drifting_column_names(tmp_path) -> None:
+    """The same column is spelled differently by every exporter."""
+    from taper.io import load_bank
+
+    path = tmp_path / "bank.csv"
+    path.write_text(
+        "Statement ID,Deposit,Posting Date,Particulars,Bank Ref No\n"
+        "b1,\"1,234.50\",01/06/2026,NEFT SETTLEMENT,UTR700001234\n",
+        encoding="utf-8",
+    )
+    rows, report = load_bank(path)
+    assert report.ok, report.errors
+    assert rows[0].credit_amount == Money("1234.50")
+    assert rows[0].utr == "UTR700001234"
+    assert rows[0].value_date.month == 6
+
+
+def test_one_bad_row_does_not_lose_the_others(tmp_path) -> None:
+    """Silently dropping a payment is how a tool produces a confident wrong total."""
+    from taper.io import load_bank
+
+    path = tmp_path / "bank.csv"
+    path.write_text(
+        "bank_txn_id,credit_amount,value_date,narration\n"
+        "b1,100.00,2026-06-01,GOOD\n"
+        "b2,not-a-number,2026-06-01,BAD AMOUNT\n"
+        "b3,300.00,not-a-date,BAD DATE\n"
+        "b4,400.00,2026-06-02,ALSO GOOD\n",
+        encoding="utf-8",
+    )
+    rows, report = load_bank(path)
+    assert [r.bank_txn_id for r in rows] == ["b1", "b4"]
+    assert len(report.errors) == 2
+    assert any("line 3" in e for e in report.errors)
+    assert any("line 4" in e for e in report.errors)
+
+
+# ---------------------------------------------------------------------------
+# Claim: "a close is re-derivable, and only real change shows"
+# ---------------------------------------------------------------------------
+
+def test_digest_is_stable_across_reruns() -> None:
+    from taper.attest import attest
+
+    case = generate(n_batches=20, seed=99)
+    cfg = RunConfig(use_llm=False)
+    first = attest(reconcile(case.bundle, config=cfg))
+    second = attest(reconcile(case.bundle, config=cfg))
+    assert first.digest == second.digest
+
+
+def test_digest_ignores_wording_but_not_conclusions() -> None:
+    """Rewording an exception must not restate the close; a changed finding must."""
+    from copy import deepcopy
+
+    from taper.attest import attest
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    baseline = attest(result).digest
+
+    reworded = deepcopy(result)
+    for exc in reworded.exceptions:
+        exc.reason = "completely different prose that says the same thing"
+    reworded.elapsed_s = result.elapsed_s + 42
+    assert attest(reworded).digest == baseline, "a copy-edit restated the close"
+
+    changed = deepcopy(result)
+    changed.findings[0].money_impact += Money("0.01")
+    assert attest(changed).digest != baseline, "a changed amount left the digest alone"
+
+
+def test_digest_survives_reordering() -> None:
+    """Collection order is not meaningful and must not reach the hash."""
+    from copy import deepcopy
+
+    from taper.attest import attest
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    shuffled = deepcopy(result)
+    shuffled.findings.reverse()
+    shuffled.matches.reverse()
+    shuffled.exceptions.reverse()
+    assert attest(shuffled).digest == attest(result).digest

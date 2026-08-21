@@ -39,6 +39,7 @@ Four more things worth thirty seconds each:
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
 | `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
+| `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
@@ -49,7 +50,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**69 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**75 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -180,6 +181,41 @@ window, which is uncommon. It is not carrying the result. The taper is driven by
 ```bash
 python -m taper.cli campaign --months 6 --average-runs 8
 ```
+
+### It reads real files, and a close is re-derivable
+
+Two things that separate a tool from a simulation.
+
+**CSV in, CSV out.** The engine reconciles files from disk, not only data it
+generated:
+
+```bash
+python -m taper.cli export --seed 99          # writes settlement/bank/ledger CSV
+python -m taper.cli ingest --settlement data/sample/settlement.csv     --bank data/sample/bank.csv --ledger data/sample/ledger.csv
+```
+
+The loader assumes real exports, not tidy ones. **Headers drift** — the same
+column is `utr`, `Bank Ref No` or `bank_reference` depending on who exported it,
+so names are normalised and resolved through an alias table. **Rows fail
+individually** — one malformed amount on line 400 must not lose the other 399,
+so bad rows are rejected with their line number and reported. Silently dropping
+a payment is how a reconciliation tool produces a confidently wrong total.
+
+**Every close carries a digest.**
+
+```
+close digest   taper-close-v1:b8327f0ce425 (34m/119f/13e)
+```
+
+It covers *conclusions* — matches, findings, exceptions — and deliberately not
+timestamps, wording or ordering. A report regenerated an hour later hashes
+identically, so only real change shows and nobody learns to ignore it. Tests
+assert that rewording an exception leaves the digest alone while changing a
+finding by one paisa does not.
+
+The round trip is the proof both work: exporting a period, reading it back and
+reconciling reaches **the identical digest** — if the CSV path lost a field or
+dropped precision on an amount, it would diverge.
 
 ### Red team — prompt injection through a bank narration
 
