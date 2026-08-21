@@ -23,7 +23,7 @@ from .metrics.harness import (
     calibration,
     layer_breakdown,
 )
-from .models import DefectClass
+from .models import DefectClass, Money
 
 # Colours live in CSS custom properties, not here, so the document can follow
 # the reader's light/dark preference. SVG uses classes rather than presentation
@@ -294,6 +294,12 @@ tr.total td{font-weight:600;border-top:2px solid var(--ink)}
 .exc .id{font-weight:600;font-size:13.5px}
 .exc .why{color:var(--muted);font-size:13px;margin-top:2px}
 .chart{margin:6px 0 4px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 18px;margin:22px 0 4px;font-size:13px;
+ padding-bottom:14px;border-bottom:1px solid var(--line)}
+.toc a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent}
+.toc a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+h3.sub{font-size:13px;text-transform:uppercase;letter-spacing:.07em}
+@media print{.toc{display:none}}
 footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
  color:var(--muted);font-size:12.5px}
 
@@ -321,6 +327,238 @@ footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
 """
 
 
+# What each defect class actually means for the money, and what a controller
+# does next. A single "money flagged" total is not actionable: a duplicate
+# capture is an exposure the merchant may owe back, while a fee overcharge is
+# cash recoverable from the gateway. Same rupees, opposite direction.
+DEFECT_MEANING: dict[DefectClass, tuple[str, str]] = {
+    DefectClass.DUPLICATE_CAPTURE: (
+        "Customer charged twice for one order",
+        "Refund the duplicate; exposure, not income",
+    ),
+    DefectClass.FEE_OVERCHARGE: (
+        "Billed above the contracted rate",
+        "Recoverable from the gateway",
+    ),
+    DefectClass.UNRECORDED_ADJUSTMENT: (
+        "Bank deducted more than the report explains",
+        "Query with the bank, or learn it as a standing charge",
+    ),
+    DefectClass.MISSING_LEDGER_ENTRY: (
+        "Money settled with no order behind it",
+        "Unrecorded revenue - find the order",
+    ),
+    DefectClass.CROSS_CYCLE_REFUND: (
+        "Refund settled in a different cycle than its payment",
+        "Timing, not loss - reclassify across periods",
+    ),
+    DefectClass.SPLIT_SETTLEMENT: (
+        "One payout arrived as several credits",
+        "No action; reconciled across the parts",
+    ),
+    DefectClass.TIMING_SHIFT: (
+        "Money landed later than the settlement date",
+        "No action; affects cash forecasting",
+    ),
+    DefectClass.MISSING_UTR: (
+        "Settlement report shipped without a reference",
+        "Matched by amount and date instead",
+    ),
+    DefectClass.NARRATION_DRIFT: (
+        "Bank narration carried no usable reference",
+        "Matched by amount and date instead",
+    ),
+}
+
+
+def money_bars(rows: list[tuple[Any, int, Any]], width: int = 760) -> str:
+    """Horizontal bars for the money breakdown.
+
+    Horizontal rather than a pie: the labels are long, the classes are ranked
+    rather than parts of one thing a reader should compare by angle, and the
+    reader's question is "what is the biggest number" - which a length answers
+    and a wedge does not.
+    """
+    if not rows:
+        return ""
+    biggest = max(float(m) for _, _, m in rows) or 1.0
+    row_h, gap, label_w = 26, 8, 190
+    height = len(rows) * (row_h + gap)
+    bar_w = width - label_w - 130
+
+    parts = [
+        f'<svg viewBox="0 0 {width} {height}" width="100%" '
+        f'role="img" aria-label="Money identified by category" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+    ]
+    for i, (dc, n, amount) in enumerate(rows):
+        y = i * (row_h + gap)
+        w = bar_w * (float(amount) / biggest)
+        parts.append(
+            f'<text x="0" y="{y + 17}" font-size="12" class="ink">'
+            f'{_esc(dc.value)}</text>'
+        )
+        parts.append(
+            f'<rect x="{label_w}" y="{y + 3}" width="{max(w, 2):.1f}" height="18" '
+            f'rx="2" class="f-accent"/>'
+        )
+        parts.append(
+            f'<text x="{label_w + max(w, 2) + 8:.1f}" y="{y + 17}" font-size="12" '
+            f'class="lbl">Rs.{amount:,.0f} · {n}</text>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def money_section(result: ReconResult) -> str:
+    """Break the flagged total into what it is and what to do about it."""
+    agg: dict[DefectClass, list[Any]] = {}
+    for f in result.findings:
+        row = agg.setdefault(f.defect_class, [0, Money("0.00")])
+        row[0] += 1
+        row[1] += f.money_impact
+
+    rows = sorted(agg.items(), key=lambda kv: -kv[1][1])
+    with_money = [(dc, n, m) for dc, (n, m) in rows if m > 0]
+    no_money = [(dc, n) for dc, (n, m) in rows if m == 0]
+    total = sum((m for _, _, m in with_money), Money("0.00"))
+
+    p = [f"<div class='chart'>{money_bars(with_money)}</div>"]
+    p.append("<table><thead><tr><th>What was found</th><th>Count</th><th>Amount</th>"
+             "<th>What it means</th><th>Action</th></tr></thead><tbody>")
+    for dc, n, amount in with_money:
+        meaning, action = DEFECT_MEANING.get(dc, ("", ""))
+        share = amount / total if total else 0
+        p.append(
+            f"<tr><td>{_esc(dc.value)}</td><td>{n}</td>"
+            f"<td><strong>Rs.{amount:,.0f}</strong> "
+            f"<span class='muted'>({share:.0%})</span></td>"
+            f"<td class='muted'>{_esc(meaning)}</td>"
+            f"<td class='muted'>{_esc(action)}</td></tr>"
+        )
+    p.append(
+        f"<tr class='total'><td>Total identified</td>"
+        f"<td>{sum(n for _, n, _ in with_money)}</td>"
+        f"<td>Rs.{total:,.0f}</td><td colspan='2'></td></tr></tbody></table>"
+    )
+
+    if no_money:
+        labels = ", ".join(f"{_esc(dc.value)} ({n})" for dc, n in no_money)
+        p.append(
+            f"<p class='muted'>Also reported with no direct rupee impact: {labels}. "
+            f"These affect cash timing and matchability rather than the balance.</p>"
+        )
+    p.append(
+        "<p class='muted'>This is money <em>identified</em>, not money recovered. "
+        "The two columns on the right exist because the same rupee means opposite "
+        "things depending on the class - a duplicate capture is owed back to a "
+        "customer, an overcharge is owed to you.</p>"
+    )
+    return "".join(p)
+
+
+def learned_section(store) -> str:
+    """What the system has taught itself, and where each lesson came from."""
+    if store is None or not len(store):
+        return (
+            "<p class='muted'>Nothing learned yet — this is a cold start. Every "
+            "recurring pattern below is currently being resolved from scratch.</p>"
+        )
+    p = ["<table><thead><tr><th>Rule</th><th>Kind</th><th>What it encodes</th>"
+         "<th>Learned from</th><th>On</th></tr></thead><tbody>"]
+    for r in store.rules:
+        params = ", ".join(f"{k}={v}" for k, v in sorted(r.params.items()) if v not in (None, ""))
+        p.append(
+            f"<tr><td class='mono'>{_esc(r.rule_id)}</td><td>{_esc(r.kind)}</td>"
+            f"<td class='mono'>{_esc(params)}</td>"
+            f"<td class='mono muted'>{_esc(r.origin_exception)}</td>"
+            f"<td class='muted'>{_esc(r.learned_on)}</td></tr>"
+        )
+    p.append("</tbody></table>")
+
+    if getattr(store, "rejected", None):
+        p.append(
+            f"<p><strong>{len(store.rejected)} candidate rule(s) refused by the "
+            f"admission gate.</strong> A rule is only admitted if replaying it "
+            f"against every already-confirmed case changes none of them.</p>"
+        )
+        for rej in store.rejected[:5]:
+            p.append(
+                f"<div class='exc'><div class='id mono'>{_esc(rej.rule.rule_id)}</div>"
+                f"<div class='why'>{_esc(rej.reason)}</div></div>"
+            )
+    else:
+        p.append(
+            "<p class='muted'>No candidate was refused this close. Every rule above "
+            "was replayed against the full history of confirmed cases before "
+            "admission.</p>"
+        )
+    return "".join(p)
+
+
+def reconciliation_detail(result: ReconResult, limit: int = 25) -> str:
+    """The working: every batch, what paid it, and how it was matched.
+
+    This is the audit trail. A controller does not sign off on a match rate;
+    they sign off on being able to see how each number was arrived at.
+    """
+    if not result.matches:
+        return "<p class='muted'>No batches matched.</p>"
+
+    ordered = sorted(result.matches, key=lambda m: (m.is_clean, -abs(m.delta)))
+    p = ["<table><thead><tr><th>Batch</th><th>Paid by</th><th>Expected</th>"
+         "<th>Credited</th><th>Delta</th><th>Matched by</th><th>Layer</th>"
+         "</tr></thead><tbody>"]
+    for m in ordered[:limit]:
+        delta_cls = "good" if m.is_clean else "bad"
+        credits = ", ".join(m.bank_txn_ids[:2])
+        if len(m.bank_txn_ids) > 2:
+            credits += f" +{len(m.bank_txn_ids) - 2}"
+        p.append(
+            f"<tr><td class='mono'>{_esc(m.batch_id)}</td>"
+            f"<td class='mono muted'>{_esc(credits)}</td>"
+            f"<td>Rs.{m.expected_net:,.2f}</td><td>Rs.{m.credited:,.2f}</td>"
+            f"<td class='{delta_cls}'>{m.delta:+,.2f}</td>"
+            f"<td class='mono muted'>{_esc(m.method)}</td>"
+            f"<td class='mono'>{_esc(m.layer.value)}</td></tr>"
+        )
+    p.append("</tbody></table>")
+    if len(ordered) > limit:
+        p.append(
+            f"<p class='muted'>Showing the {limit} least clean of "
+            f"{len(ordered)} batches. The rest reconciled exactly.</p>"
+        )
+    return "".join(p)
+
+
+def receipts_section(result: ReconResult, limit: int = 8) -> str:
+    """The largest findings with the evidence that produced them."""
+    scored = sorted(
+        (f for f in result.findings if f.money_impact > 0),
+        key=lambda f: -f.money_impact,
+    )[:limit]
+    if not scored:
+        return "<p class='muted'>No findings carried a rupee impact this close.</p>"
+
+    p = []
+    for f in scored:
+        rule = f" · rule <span class='mono'>{_esc(f.rule_id)}</span>" if f.rule_id else ""
+        ev = " · ".join(
+            f"{_esc(k)}=<span class='mono'>{_esc(v)}</span>"
+            for k, v in f.evidence.items()
+            if isinstance(v, (str, int, float)) and k not in ("reasoning",)
+        )
+        p.append(
+            f"<div class='exc'><div class='id'>Rs.{f.money_impact:,.2f} — "
+            f"{_esc(f.defect_class.value)} "
+            f"<span class='mono muted'>{_esc(f.subject_id)}</span></div>"
+            f"<div class='why'>{ev}</div>"
+            f"<div class='why'>{_esc(f.layer.value)} · confidence "
+            f"{f.confidence:.2f}{rule}</div></div>"
+        )
+    return "".join(p)
+
+
 def _kpi(value: str, label: str) -> str:
     return f'<div class="kpi"><div class="v">{value}</div><div class="l">{_esc(label)}</div></div>'
 
@@ -332,6 +570,7 @@ def render(
     period: str,
     campaign_rows: list[Any] | None = None,
     risk: dict[str, Any] | None = None,
+    store=None,
 ) -> str:
     """Build the full close package as one self-contained HTML string."""
     is_mock = "mock" in card.client_name.lower()
@@ -368,11 +607,32 @@ def render(
     p.append(_kpi(_pct(card.deterministic_share), "resolved without a model"))
     p.append("</div>")
 
+    p.append(
+        "<nav class='toc'>"
+        "<a href='#money'>Money found</a>"
+        "<a href='#taper'>The taper</a>"
+        "<a href='#learned'>What it learned</a>"
+        "<a href='#risk'>Where the work will be</a>"
+        "<a href='#accuracy'>Accuracy</a>"
+        "<a href='#detail'>Reconciliation detail</a>"
+        "<a href='#receipts'>Receipts</a>"
+        "<a href='#exceptions'>Exceptions</a>"
+        "</nav>"
+    )
+
+    # --- money, broken down and made actionable ---------------------------
+    p.append("<h2 id='money'>Money found</h2>")
+    p.append(money_section(result))
+
+    # --- what the system taught itself ------------------------------------
+    p.append("<h2 id='learned'>What the system has learned</h2>")
+    p.append(learned_section(store))
+
     # --- the taper --------------------------------------------------------
     if campaign_rows:
         a, b = campaign_rows[0], campaign_rows[-1]
         drop = 1 - (b.llm_calls_per_100 / a.llm_calls_per_100) if a.llm_calls_per_100 else 0
-        p.append("<h2>The taper — model load over consecutive closes</h2>")
+        p.append("<h2 id='taper'>The taper — model load over consecutive closes</h2>")
         p.append(f"<div class='chart'>{taper_chart(campaign_rows)}</div>")
         p.append(
             f"<p>Across {len(campaign_rows)} closes, model calls per 100 records fell "
@@ -398,7 +658,7 @@ def render(
 
     # --- where the work will be -------------------------------------------
     if risk:
-        p.append("<h2>Where the work will be — predicted before the close</h2>")
+        p.append("<h2 id='risk'>Where the work will be — predicted before the close</h2>")
         p.append(
             f"<p>A calibrated model scores every batch for the probability it needs a "
             f"human. Trained on separate periods and evaluated on data it never saw: "
@@ -445,7 +705,7 @@ def render(
             )
 
     # --- accuracy ---------------------------------------------------------
-    p.append("<h2>Accuracy against ground truth</h2>")
+    p.append("<h2 id='accuracy'>Accuracy against ground truth</h2>")
     p.append(
         "<table><thead><tr><th>Defect class</th><th>Support</th><th>TP</th><th>FP</th>"
         "<th>FN</th><th>Precision</th><th>Recall</th></tr></thead><tbody>"
@@ -509,8 +769,15 @@ def render(
             "confidence cannot support an auto-clear threshold.</p>"
         )
 
+    # --- the working ------------------------------------------------------
+    p.append("<h2 id='detail'>Reconciliation detail</h2>")
+    p.append(reconciliation_detail(result))
+
+    p.append("<h2 id='receipts'>Receipts — the largest findings and their evidence</h2>")
+    p.append(receipts_section(result))
+
     # --- exceptions -------------------------------------------------------
-    p.append(f"<h2>Exception list — {len(result.exceptions)} item(s) for a human</h2>")
+    p.append(f"<h2 id='exceptions'>Exception list — {len(result.exceptions)} item(s) for a human</h2>")
     if result.exceptions:
         for exc in result.exceptions[:40]:
             p.append(

@@ -283,7 +283,8 @@ def cmd_report(args) -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
-        render(result, card, case, case.bundle.period, rows, risk), encoding="utf-8"
+        render(result, card, case, case.bundle.period, rows, risk, store),
+        encoding="utf-8",
     )
 
     print(BAR)
