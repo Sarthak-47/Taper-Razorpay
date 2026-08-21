@@ -71,6 +71,8 @@ def cmd_reconcile(args) -> None:
     print(f"  llm calls             {card.llm_calls}  ({card.llm_calls_per_100:.2f} per 100 records)")
     print(f"  resolved w/o a model  {card.deterministic_share:6.1%}")
     print(f"  client                {card.client_name}")
+    from .attest import attest
+    print(f"  close digest          {attest(result).line()}")
 
     print(f"\n  {'-' * 68}")
     print("  ACCURACY vs INJECTED GROUND TRUTH")
@@ -392,6 +394,80 @@ def _risk_for_report(case, result, args) -> dict | None:
     }
 
 
+def cmd_export(args) -> None:
+    """Write a generated period out as CSV, so the expected shape is concrete."""
+    from .io import write_bundle
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    paths = write_bundle(case.bundle, Path(args.out))
+
+    print(BAR)
+    print(f"  EXPORTED - period {case.bundle.period} (seed {args.seed})")
+    print(BAR)
+    for name, path in paths.items():
+        rows = len(getattr(case.bundle, name))
+        print(f"  {name:<12}{rows:>6} rows  ->  {path}")
+    print("\n  Reconcile them back with:")
+    print(f"    python -m taper.cli ingest --settlement {paths['settlement']} \\")
+    print(f"        --bank {paths['bank']} --ledger {paths['ledger']}")
+    print(BAR)
+
+
+def cmd_ingest(args) -> None:
+    """Reconcile three CSV files - the same engine, on data it did not invent."""
+    from .attest import attest
+    from .engine.rules import RuleStore
+    from .io import load_bundle
+
+    cfg, client_name = _client_and_config(args)
+    _warn_mock(args)
+
+    ledger = Path(args.ledger) if args.ledger else None
+    bundle, reports = load_bundle(Path(args.settlement), Path(args.bank), ledger)
+
+    print(BAR)
+    print("  INGEST - reconciling files from disk")
+    print(BAR)
+    for name, report in reports.items():
+        print(f"  {name:<12}{report.summary()}")
+        for err in report.errors[:5]:
+            print(f"      rejected: {err}")
+        if len(report.errors) > 5:
+            print(f"      ... and {len(report.errors) - 5} more")
+
+    if not bundle.settlement or not bundle.bank:
+        print("\n  Nothing to reconcile - settlement and bank are both required.")
+        print(BAR)
+        return
+
+    store = RuleStore(RULE_STORE_PATH if args.persist_rules else None)
+    result = reconcile(bundle, store=store, config=cfg)
+    stamp = attest(result)
+
+    print(f"\n  {'-' * 68}")
+    print("  RESULT")
+    print(f"  {'-' * 68}")
+    print(f"  records            {len(bundle)}")
+    print(f"  batches matched    {len(result.matches)}")
+    print(f"  clean match rate   {result.match_rate:.1%}")
+    print(f"  findings           {len(result.findings)}")
+    print(f"  exceptions         {len(result.exceptions)}")
+    print(f"  resolver           {client_name}")
+    print(f"\n  close digest       {stamp.line()}")
+    print("  Re-running these same files reproduces this digest exactly. It covers")
+    print("  matches, findings and exceptions - not timestamps or wording - so a")
+    print("  regenerated report hashes identically and only real change shows.")
+
+    if result.exceptions:
+        print(f"\n  {'-' * 68}")
+        print(f"  EXCEPTIONS - {len(result.exceptions)} item(s) for a human")
+        print(f"  {'-' * 68}")
+        for exc in result.exceptions[: args.max_exceptions]:
+            print(f"  [{exc.kind}] {exc.subject_id}")
+            print(f"      {exc.reason[:140]}")
+    print(BAR)
+
+
 class _CompromisedClient:
     """A model that answers to the attacker rather than to us."""
 
@@ -630,6 +706,19 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    ex = sub.add_parser("export", parents=[shared], help="write a period out as CSV")
+    ex.add_argument("--seed", type=int, default=99)
+    ex.add_argument("--out", default="data/sample")
+    ex.set_defaults(func=cmd_export)
+
+    ing = sub.add_parser("ingest", parents=[shared], help="reconcile CSV files from disk")
+    ing.add_argument("--settlement", required=True)
+    ing.add_argument("--bank", required=True)
+    ing.add_argument("--ledger")
+    ing.add_argument("--persist-rules", action="store_true")
+    ing.add_argument("--max-exceptions", type=int, default=8)
+    ing.set_defaults(func=cmd_ingest)
 
     rt = sub.add_parser("redteam", parents=[shared],
                         help="prompt-injection attack through a bank narration")

@@ -34,3 +34,5 @@ data/rules.json
 .DS_Store
 Thumbs.db
 reports/
+data/sample/
+data/ci/

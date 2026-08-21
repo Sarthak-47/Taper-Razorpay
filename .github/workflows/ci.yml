@@ -63,6 +63,11 @@ jobs:
       - name: Smoke - prompt-injection red team
         run: python -m taper.cli --mock redteam --batches 20
 
+      - name: Smoke - CSV round trip
+        run: |
+          python -m taper.cli --no-llm export --seed 99 --batches 20 --out data/ci
+          python -m taper.cli --no-llm ingest             --settlement data/ci/settlement.csv             --bank data/ci/bank.csv --ledger data/ci/ledger.csv
+
   metrics:
     name: verify reported metrics
     runs-on: ubuntu-latest
