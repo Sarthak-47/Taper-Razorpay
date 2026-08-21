@@ -1,0 +1,4 @@
+# Runtime dependencies.
+# The deterministic layers and the offline mock client have NO third-party
+# dependencies - install this only if you intend to run layer 3 against a model.
+anthropic>=0.40.0

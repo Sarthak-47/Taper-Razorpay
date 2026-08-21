@@ -1,0 +1,5 @@
+# Development and CI dependencies.
+# Install into the project-local virtualenv only:
+#   python -m venv .venv
+#   .venv/Scripts/python.exe -m pip install -e ".[dev]"
+-e .[dev]
