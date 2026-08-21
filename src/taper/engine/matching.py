@@ -13,13 +13,15 @@ Layer 1 - date windows, narration regex, subset netting. Bounded heuristics.
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import timedelta
 from decimal import Decimal
 from itertools import combinations
 
 from ..models import (
     AMOUNT_TOLERANCE,
+    CONTRACTED_FEE_RATE,
+    GST_RATE,
     BankCredit,
     DefectClass,
     Money,
@@ -42,44 +44,143 @@ MAX_SETTLEMENT_LAG = timedelta(days=4)
 # single fat batch hangs the run. Anything wider is an exception, not a stall.
 SUBSET_MAX_CREDITS = 3
 
+# How many payments must share one above-base rate before it reads as pricing
+# rather than error. Three is deliberately low: the cost of asking is one
+# question, while the cost of monthly false overcharge flags is a controller who
+# stops reading the report.
+SYSTEMATIC_RATE_MIN_ROWS = 3
+
+# ...and it must also cover a majority of that method's payments. Pricing is
+# what nearly everything on a method is billed at; an overcharge is a minority.
+SYSTEMATIC_RATE_MIN_SHARE = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Layer 0 - transaction-level arithmetic
 # ---------------------------------------------------------------------------
 
-def check_fees(bundle: SourceBundle) -> list[Finding]:
-    """Recompute every fee from the contract and flag overcharges.
+def check_fees(
+    bundle: SourceBundle, store=None
+) -> tuple[list[Finding], list[Exception_]]:
+    """Recompute every fee from the contract and separate two very different things.
 
-    Independent recomputation, not verification of the PG's own arithmetic -
-    the point is to catch a wrong *rate*, which a self-consistent report will
-    never reveal. This check alone finds real money.
+    Independent recomputation, not verification of the PG's own arithmetic - the
+    point is to catch a wrong *rate*, which a self-consistent report will never
+    reveal.
+
+    But "charged more than the base rate" has two causes, and calling both an
+    overcharge is how a reconciliation tool loses a controller's trust:
+
+      * **A rate card we do not have.** International cards genuinely cost more.
+        If every one of them is billed at the same higher rate, that is pricing,
+        not theft - and flagging it monthly is noise. It becomes one exception
+        asking what the rate card says, and one learned rule ends it forever.
+
+      * **An actual overcharge.** An isolated row priced above what everything
+        else on that method was charged.
+
+    Systematic is a question; isolated is a finding. The engine cannot tell which
+    from one row, so it looks at the method's whole population before asserting.
     """
     findings: list[Finding] = []
+    exceptions: list[Exception_] = []
+
+    by_method: dict[str, list[SettlementRow]] = defaultdict(list)
     for row in bundle.settlement:
-        if row.txn_type is not TxnType.PAYMENT:
+        if row.txn_type is TxnType.PAYMENT and row.gross_amount > 0:
+            by_method[row.method].append(row)
+
+    for method, rows in sorted(by_method.items()):
+        expected_rate = _contracted_rate(method, store)
+        over: list[tuple[SettlementRow, Decimal]] = []
+        for row in rows:
+            implied = (row.fee / row.gross_amount).quantize(Decimal("0.0001"))
+            if implied > expected_rate + Decimal("0.0005"):  # above rounding noise
+                over.append((row, implied))
+
+        if not over:
             continue
-        charged = row.fee + row.gst_on_fee
-        expected = row.expected_fee + row.expected_gst
-        overcharge = charged - expected
-        if overcharge > Decimal("0.05"):  # above rounding noise
+
+        # Is one rate shared by enough rows to look like pricing rather than error?
+        #
+        # Count alone is not enough. Three overcharges that happen to land on the
+        # same rate look identical to a rate card if you only count them - and
+        # that is not hypothetical, it happened on two seeds. What separates them
+        # is *share*: pricing applies to nearly every payment on a method, while
+        # an overcharge is a minority of them. Requiring a majority keeps the
+        # 45-of-50 international-card case systematic and correctly leaves
+        # 3-of-161 domestic-card rows as the overcharges they are.
+        counts = Counter(implied for _, implied in over)
+        modal_rate, modal_n = counts.most_common(1)[0]
+        systematic = (
+            modal_n >= SYSTEMATIC_RATE_MIN_ROWS
+            and modal_n / len(rows) >= SYSTEMATIC_RATE_MIN_SHARE
+        )
+
+        if systematic:
+            exceptions.append(
+                Exception_(
+                    subject_id=f"ratecard::{method}",
+                    kind="unknown_rate_card",
+                    context={
+                        "method": method,
+                        "implied_rate": str(modal_rate),
+                        "assumed_rate": str(expected_rate),
+                        "rows_at_this_rate": modal_n,
+                    },
+                    reason=(
+                        f"{modal_n} {method} payments all billed at {modal_rate}, "
+                        f"above the assumed {expected_rate}. Consistent enough to be a "
+                        f"rate card we do not have rather than an overcharge - needs a "
+                        f"human to confirm the contracted rate for this method."
+                    ),
+                )
+            )
+
+        for row, implied in over:
+            if systematic and implied == modal_rate:
+                continue  # covered by the rate-card question above
+            charged = row.fee + row.gst_on_fee
+            fair_fee = (row.gross_amount * expected_rate).quantize(Money("0.01"))
+            fair = fair_fee + (fair_fee * GST_RATE).quantize(Money("0.01"))
             findings.append(
                 Finding(
                     defect_class=DefectClass.FEE_OVERCHARGE,
                     subject_id=row.txn_id,
-                    layer=Layer.L0_EXACT,
+                    layer=Layer.L2_RULE if _has_rate_rule(method, store) else Layer.L0_EXACT,
                     confidence=1.0,
-                    money_impact=overcharge,
+                    money_impact=charged - fair,
                     evidence={
+                        "method": method,
                         "gross": str(row.gross_amount),
                         "fee_charged": str(row.fee),
-                        "fee_expected": str(row.expected_fee),
-                        "gst_charged": str(row.gst_on_fee),
-                        "gst_expected": str(row.expected_gst),
-                        "implied_rate": str((row.fee / row.gross_amount).quantize(Money("0.0001"))),
+                        "implied_rate": str(implied),
+                        "contracted_rate": str(expected_rate),
                     },
                 )
             )
-    return findings
+
+    return findings, exceptions
+
+
+def _contracted_rate(method: str, store) -> Decimal:
+    """The rate this method should be billed at: learned if known, else the base."""
+    if store is not None and len(store):
+        for rule in store.rules:
+            if rule.kind == "fee_variant" and rule.params.get("method") == method:
+                try:
+                    return Decimal(str(rule.params["rate"]))
+                except (ArithmeticError, KeyError, ValueError):
+                    break
+    return CONTRACTED_FEE_RATE
+
+
+def _has_rate_rule(method: str, store) -> bool:
+    if store is None or not len(store):
+        return False
+    return any(
+        r.kind == "fee_variant" and r.params.get("method") == method for r in store.rules
+    )
 
 
 def check_duplicates(bundle: SourceBundle) -> list[Finding]:
@@ -682,7 +783,8 @@ def run_deterministic(
     this month cheaper than last month.
     """
     findings: list[Finding] = []
-    findings += check_fees(bundle)
+    fee_findings, fee_exceptions = check_fees(bundle, store)
+    findings += fee_findings
 
     dup_findings = check_duplicates(bundle)
     findings += dup_findings
@@ -694,4 +796,4 @@ def run_deterministic(
 
     matches, match_findings, exceptions = match_batches(bundle, store)
     findings += match_findings
-    return matches, findings, exceptions
+    return matches, findings, fee_exceptions + exceptions
