@@ -476,6 +476,24 @@ def learned_section(store) -> str:
         )
     p.append("</tbody></table>")
 
+    retired = getattr(store, "retired", None)
+    if retired:
+        p.append(
+            f"<p><strong>{len(retired)} rule(s) retired.</strong> Learning is only "
+            f"half a lifecycle: a rule that was right and stopped being right is "
+            f"worse than no rule, because it keeps asserting. These were withdrawn "
+            f"when the payouts stopped agreeing with them.</p>"
+        )
+        p.append("<table><thead><tr><th>Rule</th><th>Was</th><th>Retired because</th>"
+                 "</tr></thead><tbody>")
+        for rule, why in retired:
+            p.append(
+                f"<tr><td class='mono'>{_esc(rule.rule_id)}</td>"
+                f"<td class='mono'>{_esc(rule.params.get('amount', '-'))}</td>"
+                f"<td class='muted'>{_esc(why)}</td></tr>"
+            )
+        p.append("</tbody></table>")
+
     if getattr(store, "rejected", None):
         p.append(
             f"<p><strong>{len(store.rejected)} candidate rule(s) refused by the "

@@ -57,6 +57,9 @@ jobs:
       - name: Smoke - failure boundary
         run: python -m taper.cli stress --batches 20
 
+      - name: Smoke - rule lifecycle
+        run: python -m taper.cli --mock drift --months 5 --batches 20
+
   metrics:
     name: verify reported metrics
     runs-on: ubuntu-latest

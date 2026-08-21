@@ -392,6 +392,52 @@ def _risk_for_report(case, result, args) -> dict | None:
     }
 
 
+def cmd_drift(args) -> None:
+    """Show the full rule lifecycle: learn, drift, detect, retire, relearn."""
+    from .campaign import run_campaign
+    from .models import Money
+
+    _warn_mock(args)
+    cfg, _ = _client_and_config(args)
+    reprice = (args.reprice_month, args.bank, Money(str(args.new_charge)))
+
+    run = run_campaign(months=args.months, n_batches=args.batches,
+                       config=cfg, reprice=reprice)
+
+    print(BAR)
+    print(f"  RULE LIFECYCLE - {args.bank} reprices to Rs.{args.new_charge} "
+          f"at month {args.reprice_month}")
+    print(BAR)
+    print(f"  {'month':<8}{'rules':>7}{'exceptions':>12}{'match':>9}   event")
+    for m in run.months:
+        event = ""
+        if m.month == args.reprice_month:
+            event = f"<- {args.bank} repriced"
+        elif m.rules_learned and m.month > args.reprice_month:
+            event = "<- relearned"
+        print(f"  {m.month:<8}{m.rules_after:>7}{m.exceptions:>12}"
+              f"{m.card.match_rate:>9.1%}   {event}")
+
+    print("\n  ACTIVE RULES")
+    for r in run.store.rules:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(r.params.items())
+                           if k in ("keyword", "amount", "method", "rate", "marker"))
+        print(f"    {r.rule_id:<26}{detail}")
+
+    if run.store.retired:
+        print("\n  RETIRED")
+        for r, why in run.store.retired:
+            print(f"    {r.rule_id:<26}was {str(r.params.get('amount', '-')):<10}{why}")
+    else:
+        print("\n  Nothing was retired - the drift was not detected.")
+
+    print("\n  A rule store that only grows is a liability. When the bank repriced,")
+    print("  the stored charge kept matching the narration and stopped explaining")
+    print("  the money - so the engine named the rule that had gone stale rather")
+    print("  than failing quietly and sending the same question back every month.")
+    print(BAR)
+
+
 def cmd_stress(args) -> None:
     """Push the matcher until it breaks and report which way it failed."""
     from .adversarial import run_stress
@@ -484,6 +530,14 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    dr = sub.add_parser("drift", parents=[shared],
+                        help="rule lifecycle: learn, drift, detect, retire, relearn")
+    dr.add_argument("--months", type=int, default=6)
+    dr.add_argument("--reprice-month", type=int, default=4)
+    dr.add_argument("--bank", default="AXIS")
+    dr.add_argument("--new-charge", default="375.00")
+    dr.set_defaults(func=cmd_drift)
 
     st = sub.add_parser("stress", parents=[shared],
                         help="find the failure boundary and its direction")
