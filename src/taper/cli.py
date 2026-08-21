@@ -354,7 +354,28 @@ def cmd_risk(args) -> None:
     print(BAR)
 
 
+def _global_flags() -> argparse.ArgumentParser:
+    """Flags accepted on either side of the subcommand.
+
+    ``taper --mock risk`` and ``taper risk --mock`` both work. Plain argparse
+    only accepts the first, which is a wall a reviewer hits within about a
+    minute of copying a command out of the README.
+
+    ``SUPPRESS`` is load-bearing: without it the subparser would re-apply its
+    own defaults over anything set before the subcommand, so ``taper --batches
+    20 risk`` would silently run 40 batches.
+    """
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("--mock", action="store_true", default=argparse.SUPPRESS,
+                        help="use the offline heuristic instead of a real model")
+    parent.add_argument("--no-llm", action="store_true", default=argparse.SUPPRESS,
+                        help="deterministic layers only")
+    parent.add_argument("--batches", type=int, default=argparse.SUPPRESS)
+    return parent
+
+
 def main(argv: list[str] | None = None) -> int:
+    shared = _global_flags()
     p = argparse.ArgumentParser(prog="taper", description=__doc__)
     p.add_argument("--mock", action="store_true",
                    help="use the offline heuristic instead of a real model")
@@ -362,24 +383,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batches", type=int, default=40)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("reconcile", help="run one close and print the report")
+    r = sub.add_parser("reconcile", parents=[shared], help="run one close and print the report")
     r.add_argument("--seed", type=int, default=7)
     r.add_argument("--persist-rules", action="store_true")
     r.add_argument("--max-exceptions", type=int, default=10)
     r.set_defaults(func=cmd_reconcile)
 
-    a = sub.add_parser("ablate", help="deterministic vs full stack")
+    a = sub.add_parser("ablate", parents=[shared], help="deterministic vs full stack")
     a.add_argument("--seed", type=int, default=99)
     a.set_defaults(func=cmd_ablate)
 
-    c = sub.add_parser("campaign", help="consecutive closes; the rule-growth curve")
+    c = sub.add_parser("campaign", parents=[shared], help="consecutive closes; the rule-growth curve")
     c.add_argument("--months", type=int, default=5)
     c.add_argument("--base-seed", type=int, default=500)
     c.add_argument("--average-runs", type=int, default=8,
                    help="independent campaigns to average over (1 = single run only)")
     c.set_defaults(func=cmd_campaign)
 
-    rp = sub.add_parser("report", help="write the HTML close package")
+    rp = sub.add_parser("report", parents=[shared], help="write the HTML close package")
     rp.add_argument("--seed", type=int, default=99)
     rp.add_argument("--out", default="reports/close-report.html")
     rp.add_argument("--months", type=int, default=5)
@@ -388,14 +409,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the taper curve (much faster)")
     rp.set_defaults(func=cmd_report)
 
-    rk = sub.add_parser("risk", help="train/evaluate the exception-risk model")
+    rk = sub.add_parser("risk", parents=[shared], help="train/evaluate the exception-risk model")
     rk.add_argument("--seed", type=int, default=0)
     rk.add_argument("--backend", choices=("logistic", "gbm"), default="logistic")
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
 
-    e = sub.add_parser("evaluate", help="tuning set vs held-out set")
+    e = sub.add_parser("evaluate", parents=[shared], help="tuning set vs held-out set")
     e.add_argument("--tune-seed", type=int, default=7)
     e.add_argument("--holdout-seed", type=int, default=99)
     e.set_defaults(func=cmd_evaluate)

@@ -435,3 +435,35 @@ def test_shipped_model_needs_no_third_party_package() -> None:
         builtins.__import__ = real_import
 
     assert not touched, f"default path imported {touched}"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "commands copied from the README just work"
+# ---------------------------------------------------------------------------
+
+def test_global_flags_work_on_either_side_of_the_subcommand() -> None:
+    """`taper --batches 20 risk` and `taper risk --batches 20` must agree.
+
+    Plain argparse only accepts the first form, which is a wall a reviewer hits
+    within a minute of copying a command out of the README - and it broke CI
+    exactly that way. The SUPPRESS default is what stops the subparser
+    re-applying its own default over a value set before the subcommand.
+    """
+    import argparse
+
+    from taper.cli import _global_flags
+
+    shared = _global_flags()
+    p = argparse.ArgumentParser()
+    p.add_argument("--batches", type=int, default=40)
+    p.add_argument("--mock", action="store_true")
+    p.add_argument("--no-llm", action="store_true")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("risk", parents=[shared])
+
+    assert p.parse_args(["--batches", "20", "risk"]).batches == 20
+    assert p.parse_args(["risk", "--batches", "20"]).batches == 20
+    assert p.parse_args(["risk"]).batches == 40, "subparser clobbered the default"
+    assert p.parse_args(["risk", "--mock"]).mock is True
+    assert p.parse_args(["--mock", "risk"]).mock is True
+    assert p.parse_args(["risk"]).mock is False
