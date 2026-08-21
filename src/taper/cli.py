@@ -11,6 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .engine.llm import MODEL
 from .engine.pipeline import RunConfig, reconcile
 from .engine.results import Layer
 from .generator import generate
@@ -29,11 +30,23 @@ BAR = "=" * 72
 
 def _client_and_config(args) -> tuple[RunConfig, str]:
     use_real = not args.mock
-    cfg = RunConfig(use_llm=not args.no_llm, use_real_llm=use_real)
-    name = "anthropic:claude-sonnet-5" if use_real else "mock:offline-heuristic"
+    provider = getattr(args, "llm", "anthropic")
+    cfg = RunConfig(
+        use_llm=not args.no_llm,
+        use_real_llm=use_real,
+        provider=provider,
+        llm_base_url=getattr(args, "llm_base_url", None),
+        llm_model=getattr(args, "llm_model", None),
+    )
     if args.no_llm:
-        name = "none (deterministic only)"
-    return cfg, name
+        return cfg, "none (deterministic only)"
+    if not use_real:
+        return cfg, "mock:offline-heuristic"
+    if provider == "ollama":
+        return cfg, f"ollama:{getattr(args, 'llm_model', None) or 'qwen2.5:14b'}"
+    if provider == "openai-compatible":
+        return cfg, f"openai-compatible:{getattr(args, 'llm_model', None) or '?'}"
+    return cfg, f"anthropic:{MODEL}"
 
 
 def _warn_mock(args) -> None:
@@ -138,20 +151,25 @@ def cmd_reconcile(args) -> None:
 def cmd_ablate(args) -> None:
     case = generate(n_batches=args.batches, seed=args.seed)
     _warn_mock(args)
-    use_real = not args.mock
 
+    # Build the full-stack config through the shared helper so --llm/--llm-model
+    # reach layer 3. Constructing RunConfig inline here silently dropped them,
+    # and the ablation then demanded an Anthropic key while running on Ollama.
+    full_cfg, client_name = _client_and_config(args)
+    full_cfg.use_llm = True
     det = reconcile(case.bundle, config=RunConfig(use_llm=False))
-    full = reconcile(case.bundle, config=RunConfig(use_llm=True, use_real_llm=use_real))
+    full = reconcile(case.bundle, config=full_cfg)
 
     ab = Ablation(
         deterministic_only=score(case, det, "none"),
-        full_stack=score(case, full, "anthropic" if use_real else "mock"),
+        full_stack=score(case, full, client_name),
     )
     a, b = ab.deterministic_only, ab.full_stack
 
     print(BAR)
     print(f"  ABLATION - does the model earn its place?  (seed {args.seed})")
     print(BAR)
+    print(f"  resolver: {client_name}")
     print(f"  {'':<26}{'deterministic':>15}{'+ model':>12}{'delta':>10}")
     rows = [
         ("precision", a.precision, b.precision),
@@ -172,8 +190,7 @@ def cmd_ablate(args) -> None:
 def cmd_evaluate(args) -> None:
     """Tune-vs-holdout. The holdout seed is never used to change anything."""
     _warn_mock(args)
-    use_real = not args.mock
-    cfg = RunConfig(use_llm=not args.no_llm, use_real_llm=use_real)
+    cfg, _ = _client_and_config(args)
 
     print(BAR)
     print("  EVALUATION - tuning set vs held-out set")
@@ -700,6 +717,11 @@ def _global_flags() -> argparse.ArgumentParser:
     parent.add_argument("--no-llm", action="store_true", default=argparse.SUPPRESS,
                         help="deterministic layers only")
     parent.add_argument("--batches", type=int, default=argparse.SUPPRESS)
+    parent.add_argument("--llm", choices=("anthropic", "ollama", "openai-compatible"),
+                        default=argparse.SUPPRESS,
+                        help="which real provider layer 3 uses")
+    parent.add_argument("--llm-base-url", default=argparse.SUPPRESS)
+    parent.add_argument("--llm-model", default=argparse.SUPPRESS)
     return parent
 
 
@@ -710,6 +732,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="use the offline heuristic instead of a real model")
     p.add_argument("--no-llm", action="store_true", help="deterministic layers only")
     p.add_argument("--batches", type=int, default=40)
+    p.add_argument("--llm", choices=("anthropic", "ollama", "openai-compatible"),
+                   default="anthropic", help="which real provider layer 3 uses")
+    p.add_argument("--llm-base-url", default=None)
+    p.add_argument("--llm-model", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("reconcile", parents=[shared], help="run one close and print the report")

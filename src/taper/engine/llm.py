@@ -48,18 +48,30 @@ Deterministic layers have already handled every unambiguous case, so assume the 
 easy explanation has been ruled out.
 
 Return STRICT JSON, no prose, with these keys:
-  defect_class   one of: unrecorded_adjustment, split_settlement, narration_drift,
-                 missing_utr, timing_shift, or "unknown" if you cannot tell
+  defect_class   MUST be exactly one of these six strings, copied verbatim:
+                   "unrecorded_adjustment"  the bank deducted something the report
+                                            does not show (a processing or service
+                                            charge). Use this together with
+                                            claimed_adjustment below.
+                   "split_settlement"       one payout arrived as several credits
+                   "narration_drift"        the narration carries no usable reference
+                   "missing_utr"            the settlement report has no reference
+                   "timing_shift"           the money landed later than expected
+                   "unknown"                you cannot tell
+                 Do NOT invent a value, and do NOT put the name of any other field
+                 here - "claimed_adjustment" is a separate numeric field, never a
+                 defect_class.
   bank_txn_ids   list of bank credit ids you believe pay this batch (may be empty)
   reasoning      one short sentence
   confidence     0.0-1.0, calibrated: use <0.7 when genuinely unsure
   claimed_adjustment
                  null, or a positive amount you believe the bank deducted and the
-                 settlement report does not show. Use this when the credits you
-                 named are short of the expected payout by a consistent amount
-                 (a processing or service charge). The system verifies that the
-                 sums close exactly with your number, so a guess that is merely
-                 close will be rejected - omit it rather than approximate.
+                 settlement report does not show. When you set this, defect_class
+                 must be "unrecorded_adjustment". Use it when the credits you named
+                 are short of the expected payout by a consistent amount. The system
+                 verifies that the sums close exactly with your number, so a guess
+                 that is merely close will be rejected - omit it rather than
+                 approximate.
   proposed_rule  null, or an object {kind, params, confidence} where kind is one of
                  bank_timing {bank, offset_days}
                  narration_alias {pattern, utr}
@@ -72,6 +84,14 @@ Rules for you specifically:
 - Answering "unknown" with low confidence is a correct and useful answer. An
   item left on the exception list costs one human review. A wrong confident
   answer corrupts the close.
+- Before naming credits, sanity-check the magnitudes. If the credits you would
+  name are not clearly close to the expected payout - within a small charge, or
+  summing to roughly it - then you have not found the answer. Say "unknown" with
+  low confidence instead of naming the nearest candidate.
+- Never invent a claimed_adjustment to close a large gap. A processing or
+  service charge is a small round amount next to the payout. If the shortfall is
+  a large fraction of the batch, the missing money is another credit you have
+  not been shown, not a charge - answer "unknown".
 - Only propose a rule when the pattern would plausibly recur every month."""
 
 
@@ -112,6 +132,99 @@ class AnthropicClient:
         )
         self._calls += 1
         text = "".join(b.text for b in resp.content if b.type == "text")
+        return _parse_json(text)
+
+
+@dataclass
+class OpenAICompatibleClient:
+    """Layer 3 against any OpenAI-shaped endpoint: Ollama, Groq, OpenRouter.
+
+    Layer 3 is a swappable component, and this is the proof rather than the
+    claim. The same exception queue, the same prompt, and - critically - the
+    same ``verify_proposal`` gate on the way out, so the provider changes
+    nothing about what is allowed to become a finding.
+
+    That is what makes a small local model a reasonable choice here rather than
+    a compromise. A 14B model on a laptop cannot produce a false reconciliation
+    for the same reason a compromised model cannot: it proposes, and arithmetic
+    disposes. The worst a weak model does is decline more often and leave more
+    on the exception list, which is the failure mode this system is built to
+    absorb.
+
+    Uses only the standard library. Adding an HTTP client for one POST would
+    contradict the rest of the project.
+    """
+
+    base_url: str = "http://localhost:11434/v1"
+    model: str = "qwen2.5:14b"
+    api_key: str | None = None      # unused by Ollama; required by hosted ones
+    timeout: float = 120.0          # local models on CPU are not fast
+    _calls: int = 0
+
+    @property
+    def name(self) -> str:
+        host = self.base_url.split("//")[-1].split("/")[0]
+        return f"{host}:{self.model}"
+
+    def classify(self, exc: Exception_, context: dict[str, Any]) -> dict[str, Any]:
+        import urllib.error
+        import urllib.request
+
+        payload = {
+            "kind": exc.kind,
+            "subject_id": exc.subject_id,
+            "reason_deterministic_failed": exc.reason,
+            "batch": exc.context,
+            "candidate_credits": context.get("candidates", []),
+        }
+        body = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, indent=2)},
+                ],
+                # Deterministic decoding: this is a classification with one
+                # right answer, not a generation task, and a close that changes
+                # between reruns cannot be signed off.
+                "temperature": 0,
+                "max_tokens": 700,
+                "response_format": {"type": "json_object"},
+            }
+        ).encode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(  # noqa: S310 - operator-configured host
+            f"{self.base_url.rstrip('/')}/chat/completions",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        self._calls += 1
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc_err:
+            # A provider that is down or slow must not fail the close. The item
+            # stays on the exception list, which is where it already was.
+            return {
+                "defect_class": "unknown",
+                "bank_txn_ids": [],
+                "confidence": 0.0,
+                "reasoning": f"provider unreachable: {type(exc_err).__name__}",
+                "proposed_rule": None,
+            }
+
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return {
+                "defect_class": "unknown", "bank_txn_ids": [], "confidence": 0.0,
+                "reasoning": "unexpected response shape", "proposed_rule": None,
+            }
         return _parse_json(text)
 
 
@@ -320,12 +433,39 @@ def to_finding(
     )
 
 
-def get_client(use_real: bool) -> LLMClient:
-    if use_real:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Run with --mock to use the offline "
-                "heuristic, but do not report those numbers as LLM results."
-            )
-        return AnthropicClient()
-    return MockClient()
+def get_client(
+    use_real: bool,
+    provider: str = "anthropic",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> LLMClient:
+    """Pick the layer 3 client.
+
+    Three real providers and one stand-in. The stand-in is the only one whose
+    numbers must never be reported, and it is the only one that is not a model.
+    """
+    if not use_real:
+        return MockClient()
+
+    if provider == "ollama":
+        return OpenAICompatibleClient(
+            base_url=base_url or "http://localhost:11434/v1",
+            model=model or "qwen2.5:14b",
+        )
+
+    if provider == "openai-compatible":
+        if not base_url:
+            raise RuntimeError("--llm-base-url is required for an openai-compatible provider")
+        key_env = os.environ.get("LLM_API_KEY")
+        return OpenAICompatibleClient(
+            base_url=base_url, model=model or "", api_key=key_env
+        )
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Options: --llm ollama to run layer 3 "
+            "locally, --llm openai-compatible with --llm-base-url for a hosted "
+            "provider, or --mock for the offline heuristic - whose numbers must "
+            "not be reported as model results."
+        )
+    return AnthropicClient()

@@ -1245,3 +1245,70 @@ def test_relearned_rule_keeps_its_own_banks_keyword() -> None:
     assert live.get("PROC CHG") == "375.00", f"AXIS not relearned correctly: {live}"
     # SBI never repriced, so its rule must be untouched at its original amount.
     assert live.get("SVC CHG") == "500.00", f"SBI's rule was disturbed: {live}"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "layer 3 is a swappable component"
+# ---------------------------------------------------------------------------
+
+def test_provider_flags_reach_every_command() -> None:
+    """Provider selection must survive into the config each command builds.
+
+    `ablate` and `evaluate` originally constructed RunConfig inline and dropped
+    --llm/--llm-model, so running the ablation against Ollama demanded an
+    Anthropic key and crashed. Any command that builds a config has to go
+    through the shared helper.
+    """
+    from taper.cli import _client_and_config, main
+
+    parser_ok = True
+    try:
+        main(["--llm", "ollama", "--llm-model", "qwen2.5:7b", "evaluate", "--help"])
+    except SystemExit as exc:  # --help exits 0
+        parser_ok = exc.code == 0
+    assert parser_ok
+
+    from argparse import Namespace
+
+    args = Namespace(mock=False, no_llm=False, llm="ollama",
+                     llm_base_url=None, llm_model="qwen2.5:7b")
+    cfg, name = _client_and_config(args)
+    assert cfg.provider == "ollama"
+    assert cfg.llm_model == "qwen2.5:7b"
+    assert "ollama" in name
+
+
+def test_local_provider_needs_no_api_key() -> None:
+    """Ollama must be reachable without any Anthropic credential."""
+    import os
+
+    from taper.engine.llm import OpenAICompatibleClient, get_client
+
+    saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        client = get_client(use_real=True, provider="ollama", model="qwen2.5:7b")
+        assert isinstance(client, OpenAICompatibleClient)
+        assert client.api_key is None
+        assert "11434" in client.base_url
+    finally:
+        if saved is not None:
+            os.environ["ANTHROPIC_API_KEY"] = saved
+
+
+def test_unreachable_provider_degrades_to_an_exception() -> None:
+    """A provider that is down must not fail the close.
+
+    The item stays on the exception list, which is where it already was. A
+    reconciliation that aborts because an optional layer timed out is worse
+    than one that hands a few more items to a human.
+    """
+    from taper.engine.llm import OpenAICompatibleClient
+    from taper.engine.results import Exception_
+
+    dead = OpenAICompatibleClient(base_url="http://127.0.0.1:9/v1", model="none", timeout=2.0)
+    out = dead.classify(
+        Exception_(subject_id="s1", kind="unmatched_batch", reason="x"), {"candidates": []}
+    )
+    assert out["defect_class"] == "unknown"
+    assert out["confidence"] == 0.0
+    assert "unreachable" in out["reasoning"]

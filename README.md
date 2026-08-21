@@ -40,6 +40,7 @@ Four more things worth thirty seconds each:
 | `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
 | `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
 | `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
+| `taper --llm ollama reconcile` | Layer 3 against a **local model, no API key** — and an ablation that honestly reports it added nothing |
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
@@ -50,7 +51,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**85 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**89 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -217,6 +218,55 @@ finding by one paisa does not.
 The round trip is the proof both work: exporting a period, reading it back and
 reconciling reaches **the identical digest** — if the CSV path lost a field or
 dropped precision on an amount, it would diverge.
+
+### Layer 3 on a local model — and the ablation saying it did not help
+
+Layer 3 is a swappable component, and this is the proof rather than the claim.
+The same prompt, the same exception queue and the same verification gate run
+against Anthropic, **Ollama on a laptop**, or any OpenAI-compatible endpoint:
+
+```bash
+python -m taper.cli --llm ollama --llm-model qwen2.5:14b reconcile --seed 99
+python -m taper.cli --llm ollama --llm-model qwen2.5:14b ablate --seed 99
+```
+
+Run against a local **qwen2.5:14b**, on one close of ~1,360 records:
+
+| | Deterministic | + local model |
+|---|---|---|
+| Precision | 1.000 | **1.000** |
+| Recall | 0.908 | 0.908 |
+| Match rate | 76.5% | 76.5% |
+| Exceptions left | 13 | **13** |
+| Model calls | 0 | 13 |
+
+> **VERDICT — The model added nothing measurable on this run. On this data the
+> deterministic layers are sufficient and layer 3 should be disabled.**
+
+That is the ablation doing its job. It exists to answer "does the model earn its
+place", and here the answer is no — so the tool says so instead of quietly
+keeping a component that does nothing.
+
+**What the 13 calls actually did** is the more interesting half. Five were honest
+declines. The other eight were **confabulations**: the model proposed adjustments
+of ₹1,123, ₹511.60, ₹98.12 on gaps of forty to seventy thousand — plausible-
+looking numbers that explain nothing. Every one was refused by arithmetic, and
+precision never left 1.000.
+
+So a 14B model on a laptop is a *safe* choice here rather than a compromise. It
+cannot produce a false reconciliation for the same reason a compromised model
+cannot: it proposes, and arithmetic disposes. A weak model simply declines more
+and leaves more on the exception list — the failure mode the whole system is
+built to absorb.
+
+Prompt hardening measurably improved its calibration: telling it to sanity-check
+magnitudes and never invent a charge to close a large gap moved honest declines
+from 1 to 5 and confabulations from 12 to 8.
+
+**Honest scope:** this says qwen2.5:14b adds nothing *on this workload*. It is
+not evidence about frontier models — those numbers need an API key and have not
+been run. Every artifact records which resolver produced it, so the two can
+never be confused.
 
 ### Red team — prompt injection through a bank narration
 

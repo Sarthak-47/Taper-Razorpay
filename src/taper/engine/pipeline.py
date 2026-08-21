@@ -29,6 +29,12 @@ class RunConfig:
     use_real_llm: bool = False
     learn_rules: bool = True
     confidence_floor: float = 0.60  # below this we keep the exception instead
+    # Which real provider layer 3 uses. The architecture treats this as an
+    # implementation detail on purpose - every provider goes through the same
+    # verification gate, so none of them can change what becomes a finding.
+    provider: str = "anthropic"
+    llm_base_url: str | None = None
+    llm_model: str | None = None
 
 
 def reconcile(
@@ -96,7 +102,9 @@ def reconcile(
         result.elapsed_s = time.perf_counter() - started
         return result
 
-    client = client or get_client(config.use_real_llm)
+    client = client or get_client(
+        config.use_real_llm, config.provider, config.llm_base_url, config.llm_model
+    )
     history = build_history(result.findings, bundle)
 
     for exc in still_open:
