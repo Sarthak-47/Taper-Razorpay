@@ -25,15 +25,9 @@ from .metrics.harness import (
 )
 from .models import DefectClass
 
-# --- palette -------------------------------------------------------------
-INK = "#1a1a1a"
-MUTED = "#6b6b6b"
-LINE = "#e2e0da"
-PAPER = "#faf9f6"
-ACCENT = "#c98a2b"      # the money line
-GOOD = "#2f7d5d"
-BAD = "#b3402f"
-
+# Colours live in CSS custom properties, not here, so the document can follow
+# the reader's light/dark preference. SVG uses classes rather than presentation
+# attributes because `fill="var(--x)"` is not reliably supported on those.
 
 def _esc(v: Any) -> str:
     return html.escape(str(v))
@@ -92,11 +86,11 @@ def taper_chart(rows: list[Any], width: int = 760, height: int = 300) -> str:
         gy = pad_t + h - h * frac
         parts.append(
             f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + w}" y2="{gy:.1f}" '
-            f'stroke="{LINE}" stroke-width="1"/>'
+            f'class="grid" stroke-width="1"/>'
         )
         parts.append(
             f'<text x="{pad_l - 10}" y="{gy + 4:.1f}" text-anchor="end" '
-            f'font-size="11" fill="{MUTED}">{frac:.0%}</text>'
+            f'font-size="11" class="lbl">{frac:.0%}</text>'
         )
 
     # right axis (model calls)
@@ -104,43 +98,43 @@ def taper_chart(rows: list[Any], width: int = 760, height: int = 300) -> str:
         gy = pad_t + h - h * frac
         parts.append(
             f'<text x="{pad_l + w + 10}" y="{gy + 4:.1f}" text-anchor="start" '
-            f'font-size="11" fill="{ACCENT}">{call_max * frac:.2f}</text>'
+            f'font-size="11" class="accent-txt">{call_max * frac:.2f}</text>'
         )
 
     # x labels
     for i, m in enumerate(months):
         parts.append(
             f'<text x="{x(i):.1f}" y="{pad_t + h + 22:.1f}" text-anchor="middle" '
-            f'font-size="11" fill="{MUTED}">month {m}</text>'
+            f'font-size="11" class="lbl">month {m}</text>'
         )
 
     # match-rate line
     pts = " ".join(f"{x(i):.1f},{y_match(v):.1f}" for i, v in enumerate(match))
     parts.append(
-        f'<polyline points="{pts}" fill="none" stroke="{GOOD}" stroke-width="2.5" '
+        f'<polyline points="{pts}" fill="none" class="s-good" stroke-width="2.5" '
         f'stroke-linejoin="round" stroke-linecap="round"/>'
     )
     for i, v in enumerate(match):
-        parts.append(f'<circle cx="{x(i):.1f}" cy="{y_match(v):.1f}" r="4" fill="{GOOD}"/>')
+        parts.append(f'<circle cx="{x(i):.1f}" cy="{y_match(v):.1f}" r="4" class="f-good"/>')
 
     # model-calls line
     pts = " ".join(f"{x(i):.1f},{y_calls(v):.1f}" for i, v in enumerate(calls))
     parts.append(
-        f'<polyline points="{pts}" fill="none" stroke="{ACCENT}" stroke-width="2.5" '
+        f'<polyline points="{pts}" fill="none" class="s-accent" stroke-width="2.5" '
         f'stroke-dasharray="6 4" stroke-linejoin="round" stroke-linecap="round"/>'
     )
     for i, v in enumerate(calls):
-        parts.append(f'<circle cx="{x(i):.1f}" cy="{y_calls(v):.1f}" r="4" fill="{ACCENT}"/>')
+        parts.append(f'<circle cx="{x(i):.1f}" cy="{y_calls(v):.1f}" r="4" class="f-accent"/>')
 
     # legend
     parts.append(
         f'<g font-size="12">'
         f'<line x1="{pad_l}" y1="{pad_t - 8}" x2="{pad_l + 22}" y2="{pad_t - 8}" '
-        f'stroke="{GOOD}" stroke-width="2.5"/>'
-        f'<text x="{pad_l + 28}" y="{pad_t - 4}" fill="{INK}">clean match rate</text>'
+        f'class="s-good" stroke-width="2.5"/>'
+        f'<text x="{pad_l + 28}" y="{pad_t - 4}" class="ink">clean match rate</text>'
         f'<line x1="{pad_l + 170}" y1="{pad_t - 8}" x2="{pad_l + 192}" y2="{pad_t - 8}" '
-        f'stroke="{ACCENT}" stroke-width="2.5" stroke-dasharray="6 4"/>'
-        f'<text x="{pad_l + 198}" y="{pad_t - 4}" fill="{INK}">model calls / 100 records</text>'
+        f'class="s-accent" stroke-width="2.5" stroke-dasharray="6 4"/>'
+        f'<text x="{pad_l + 198}" y="{pad_t - 4}" class="ink">model calls / 100 records</text>'
         f'</g>'
     )
     parts.append("</svg>")
@@ -176,37 +170,37 @@ def reliability_chart(bins: list[tuple[float, float, float, int]],
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         parts.append(
             f'<line x1="{pad}" y1="{py(frac):.1f}" x2="{pad + w}" y2="{py(frac):.1f}" '
-            f'stroke="{LINE}" stroke-width="1"/>'
+            f'class="grid" stroke-width="1"/>'
         )
         parts.append(
             f'<text x="{pad - 8}" y="{py(frac) + 4:.1f}" text-anchor="end" '
-            f'font-size="10" fill="{MUTED}">{frac:.1f}</text>'
+            f'font-size="10" class="lbl">{frac:.1f}</text>'
         )
         parts.append(
             f'<text x="{px(frac):.1f}" y="{pad + h + 18:.1f}" text-anchor="middle" '
-            f'font-size="10" fill="{MUTED}">{frac:.1f}</text>'
+            f'font-size="10" class="lbl">{frac:.1f}</text>'
         )
 
     parts.append(
         f'<line x1="{px(0):.1f}" y1="{py(0):.1f}" x2="{px(1):.1f}" y2="{py(1):.1f}" '
-        f'stroke="{MUTED}" stroke-width="1.5" stroke-dasharray="4 4"/>'
+        f'class="diag" stroke-width="1.5" stroke-dasharray="4 4"/>'
     )
     pts = " ".join(f"{px(p):.1f},{py(o):.1f}" for _, p, o, _ in bins)
     parts.append(
-        f'<polyline points="{pts}" fill="none" stroke="{ACCENT}" stroke-width="2.5" '
+        f'<polyline points="{pts}" fill="none" class="s-accent" stroke-width="2.5" '
         f'stroke-linejoin="round"/>'
     )
     for _, p, o, n in bins:
         r = 3 + min(n / 25, 5)
-        parts.append(f'<circle cx="{px(p):.1f}" cy="{py(o):.1f}" r="{r:.1f}" fill="{ACCENT}"/>')
+        parts.append(f'<circle cx="{px(p):.1f}" cy="{py(o):.1f}" r="{r:.1f}" class="f-accent"/>')
 
     parts.append(
         f'<text x="{pad + w / 2:.0f}" y="{height - 6}" text-anchor="middle" '
-        f'font-size="11" fill="{MUTED}">predicted probability</text>'
+        f'font-size="11" class="lbl">predicted probability</text>'
     )
     parts.append(
         f'<text x="12" y="{pad + h / 2:.0f}" text-anchor="middle" font-size="11" '
-        f'fill="{MUTED}" transform="rotate(-90 12 {pad + h / 2:.0f})">observed rate</text>'
+        f'class="lbl" transform="rotate(-90 12 {pad + h / 2:.0f})">observed rate</text>'
     )
     parts.append("</svg>")
     return "".join(parts)
@@ -216,11 +210,11 @@ def layer_bar(result: ReconResult) -> str:
     """Where the work happened. One stacked bar, deterministic tiers first."""
     counts = layer_breakdown(result)
     total = sum(counts.values()) or 1
-    colors = {
-        Layer.L0_EXACT.value: "#2f4f4f",
-        Layer.L1_FUZZY.value: "#5c7f76",
-        Layer.L2_RULE.value: GOOD,
-        Layer.L3_LLM.value: ACCENT,
+    css_class = {
+        Layer.L0_EXACT.value: "l0",
+        Layer.L1_FUZZY.value: "l1",
+        Layer.L2_RULE.value: "l2",
+        Layer.L3_LLM.value: "l3",
     }
     segs, legend, x = [], [], 0.0
     for layer in Layer:
@@ -228,13 +222,13 @@ def layer_bar(result: ReconResult) -> str:
         if not n:
             continue
         wpc = 100 * n / total
+        cls = css_class[layer.value]
         segs.append(
-            f'<rect x="{x:.2f}%" y="0" width="{wpc:.2f}%" height="34" '
-            f'fill="{colors[layer.value]}"/>'
+            f'<rect x="{x:.2f}%" y="0" width="{wpc:.2f}%" height="34" class="seg {cls}"/>'
         )
         x += wpc
         legend.append(
-            f'<span class="key"><i style="background:{colors[layer.value]}"></i>'
+            f'<span class="key"><i class="{cls}"></i>'
             f'{_esc(layer.value)} — {n} ({wpc:.1f}%)</span>'
         )
     return (
@@ -248,41 +242,82 @@ def layer_bar(result: ReconResult) -> str:
 # Report
 # ---------------------------------------------------------------------------
 
-CSS = f"""
-*{{box-sizing:border-box}}
-body{{margin:0;background:{PAPER};color:{INK};
- font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}}
-.wrap{{max-width:940px;margin:0 auto;padding:44px 28px 80px}}
-h1{{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}}
-h2{{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:{MUTED};
- margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid {LINE}}}
-.sub{{color:{MUTED};margin:0 0 6px}}
-.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
- background:{LINE};border:1px solid {LINE};margin-top:24px}}
-.kpi{{background:{PAPER};padding:16px 18px}}
-.kpi .v{{font-size:25px;font-weight:600;letter-spacing:-.02em}}
-.kpi .l{{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:{MUTED};margin-top:3px}}
-table{{width:100%;border-collapse:collapse;font-size:14px}}
-th,td{{text-align:right;padding:8px 10px;border-bottom:1px solid {LINE}}}
-th:first-child,td:first-child{{text-align:left}}
-th{{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:{MUTED};font-weight:600}}
-tbody tr:last-child td{{border-bottom:none}}
-tr.total td{{font-weight:600;border-top:2px solid {INK}}}
-.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}}
-.good{{color:{GOOD};font-weight:600}} .bad{{color:{BAD};font-weight:600}}
-.muted{{color:{MUTED}}}
-.banner{{background:#fdf3e0;border-left:3px solid {ACCENT};padding:13px 16px;margin:22px 0;font-size:14px}}
-.banner.warn{{background:#fdeceb;border-left-color:{BAD}}}
-.legend{{margin-top:10px;font-size:12.5px;color:{MUTED}}}
-.key{{display:inline-flex;align-items:center;margin-right:16px}}
-.key i{{width:10px;height:10px;border-radius:2px;margin-right:6px;display:inline-block}}
-.exc{{border-left:2px solid {LINE};padding:9px 0 9px 14px;margin-bottom:10px}}
-.exc .id{{font-weight:600;font-size:13.5px}}
-.exc .why{{color:{MUTED};font-size:13px;margin-top:2px}}
-.chart{{margin:6px 0 4px}}
-footer{{margin-top:56px;padding-top:16px;border-top:1px solid {LINE};
- color:{MUTED};font-size:12.5px}}
-@media print{{body{{background:#fff}} .wrap{{padding:0}}}}
+CSS = """
+/* Light is the default because this is a document that gets printed and
+   emailed. Dark is a first-class alternative, not an afterthought - a finance
+   report that glares white at midnight is the one a reviewer closes.
+   Print always forces light: dark ink on dark paper wastes toner and reads badly. */
+:root{
+  --paper:#faf9f6; --raise:#ffffff; --ink:#1a1a1a; --muted:#6b6b6b;
+  --line:#e2e0da; --accent:#c98a2b; --good:#2f7d5d; --bad:#b3402f;
+  --warn-bg:#fdf3e0; --err-bg:#fdeceb;
+  --l0:#2f4f4f; --l1:#5c7f76;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#16161a; --raise:#1e1e24; --ink:#ececec; --muted:#9a9a9a;
+    --line:#32323a; --accent:#e0a94b; --good:#59b98c; --bad:#e0705e;
+    --warn-bg:#2a2317; --err-bg:#2c1c1a;
+    --l0:#6e9a9a; --l1:#7fae9f;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+ font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:940px;margin:0 auto;padding:44px 28px 80px}
+h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+ margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.sub{color:var(--muted);margin:0 0 6px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+ background:var(--line);border:1px solid var(--line);margin-top:24px}
+.kpi{background:var(--raise);padding:16px 18px}
+.kpi .v{font-size:25px;font-weight:600;letter-spacing:-.02em}
+.kpi .l{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:3px}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tr.total td{font-weight:600;border-top:2px solid var(--ink)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+.good{color:var(--good);font-weight:600} .bad{color:var(--bad);font-weight:600}
+.muted{color:var(--muted)}
+.banner{background:var(--warn-bg);border-left:3px solid var(--accent);
+ padding:13px 16px;margin:22px 0;font-size:14px}
+.banner.warn{background:var(--err-bg);border-left-color:var(--bad)}
+.legend{margin-top:10px;font-size:12.5px;color:var(--muted)}
+.key{display:inline-flex;align-items:center;margin-right:16px}
+.key i{width:10px;height:10px;border-radius:2px;margin-right:6px;display:inline-block}
+.exc{border-left:2px solid var(--line);padding:9px 0 9px 14px;margin-bottom:10px}
+.exc .id{font-weight:600;font-size:13.5px}
+.exc .why{color:var(--muted);font-size:13px;margin-top:2px}
+.chart{margin:6px 0 4px}
+footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
+ color:var(--muted);font-size:12.5px}
+
+/* SVG + layer-bar palette */
+.grid{stroke:var(--line)}
+.diag{stroke:var(--muted)}
+.lbl{fill:var(--muted)}
+.ink{fill:var(--ink)}
+.accent-txt{fill:var(--accent)}
+.s-good{stroke:var(--good)} .f-good{fill:var(--good)}
+.s-accent{stroke:var(--accent)} .f-accent{fill:var(--accent)}
+.l0{background:var(--l0)} rect.l0{fill:var(--l0)}
+.l1{background:var(--l1)} rect.l1{fill:var(--l1)}
+.l2{background:var(--good)} rect.l2{fill:var(--good)}
+.l3{background:var(--accent)} rect.l3{fill:var(--accent)}
+
+@media print{
+  :root{
+    --paper:#fff; --raise:#fff; --ink:#111; --muted:#555; --line:#ddd;
+    --accent:#9a6a1f; --good:#1f5c43; --bad:#8c2f21;
+  }
+  body{background:#fff}
+  .wrap{padding:0}
+}
 """
 
 
@@ -494,4 +529,11 @@ def render(
         "Findings are scored against injected ground truth, not sampled by hand."
         "</footer></div></body></html>"
     )
-    return "".join(p)
+
+    # Wrap every table so wide ones scroll inside their own box. Done once here
+    # rather than at each call site: the page body must never scroll sideways,
+    # and a table added later would otherwise quietly break that.
+    doc = "".join(p)
+    doc = doc.replace("<table>", '<div class="tablewrap"><table>')
+    doc = doc.replace("</table>", "</table></div>")
+    return doc

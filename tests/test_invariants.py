@@ -597,3 +597,26 @@ def test_claimed_adjustment_must_be_a_positive_number() -> None:
         }
         v = verify_proposal(proposal, Money("5000.00"), {"b1": Money("4000.00")})
         assert not v.ok, f"accepted claimed_adjustment={bad!r}"
+
+
+def test_report_defines_both_themes_and_a_print_override() -> None:
+    """The report must follow the reader's light/dark preference.
+
+    A finance document that glares white at midnight is one a reviewer closes.
+    Print is forced back to light because dark ink on dark paper reads badly
+    and wastes toner.
+    """
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=12, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, _score(case, result, "mock"), case, "2026-06")
+
+    assert "prefers-color-scheme: dark" in html
+    assert "@media print" in html
+    # Every colour must come from a token, so one override flips the whole page.
+    assert html.count("var(--") > 30
+    # Tables scroll inside their own box; the page body never scrolls sideways.
+    assert html.count('class="tablewrap"') >= 1
