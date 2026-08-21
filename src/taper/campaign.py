@@ -24,7 +24,7 @@ from .engine.results import Exception_, ReconResult
 from .engine.rules import Rule, RuleStore, build_history, next_rule_id
 from .generator import DefectRates, GeneratedCase, generate
 from .metrics.harness import Scorecard, score
-from .models import DefectClass
+from .models import DefectClass, Money
 
 
 @dataclass
@@ -43,6 +43,20 @@ class HumanOracle:
 
     def resolve(self, exc: Exception_) -> dict[str, Any] | None:
         self.reviews += 1
+
+        # A human staring at an unmatched batch reads the candidate narrations
+        # next to the settlement's own reference and spots the correspondence:
+        # "the bank writes REF 70000123456, our report says UTR70000123456 -
+        # it's the same number under a different label." That observation, once,
+        # is worth a permanent alias.
+        alias = self._spot_reference_alias(exc)
+        if alias:
+            return alias
+
+        lag = self._spot_timing_lag(exc)
+        if lag:
+            return lag
+
         truths = [d for d in self.case.defects if d.subject_id == exc.subject_id]
         if not truths:
             return None
@@ -67,6 +81,80 @@ class HumanOracle:
                 },
             }
         return {"defect_class": truths[0].defect_class.value, "proposed_rule": None}
+
+    def _spot_timing_lag(self, exc: Exception_) -> dict[str, Any] | None:
+        """Find the batch's money sitting just outside the settlement window.
+
+        A controller chasing an unmatched payout looks a few days further out and
+        finds the exact amount landed late. The observation generalises: that
+        bank is simply slower than the default window assumes.
+
+        Requires an *exact* amount match. A near-miss outside the window is two
+        unknowns at once and teaches nothing reliable.
+        """
+        if exc.kind != "unmatched_batch":
+            return None
+        try:
+            expected = Money(str(exc.context.get("expected_net")))
+            settled_on = date.fromisoformat(str(exc.context.get("settled_on")))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+
+        claimed = {b for c in self.case.bundle.bank for b in [c.bank_txn_id]
+                   if b in exc.candidates}
+        for credit in self.case.bundle.bank:
+            if credit.bank_txn_id in claimed:
+                continue
+            lag_days = (credit.value_date - settled_on).days
+            if lag_days <= 4 or lag_days > 9:
+                continue
+            if abs(credit.credit_amount - expected) <= Money("1.00"):
+                return {
+                    "defect_class": DefectClass.TIMING_SHIFT.value,
+                    "proposed_rule": {
+                        "kind": "bank_timing",
+                        "params": {
+                            "bank": _bank_from_narration(credit.narration),
+                            "offset_days": lag_days,
+                        },
+                        "confidence": 0.9,
+                    },
+                }
+        return None
+
+    def _spot_reference_alias(self, exc: Exception_) -> dict[str, Any] | None:
+        """Find a narration that quotes the batch's own reference under a label.
+
+        Only fires when the digits in the narration *are* the settlement's UTR -
+        the correspondence is verified, not assumed. A label that happens to sit
+        near some other number teaches nothing and is skipped.
+        """
+        if exc.kind != "unmatched_batch":
+            return None
+        utr = exc.context.get("utr")
+        if not utr:
+            return None
+        digits = str(utr).removeprefix("UTR")
+
+        by_id = {c.bank_txn_id: c for c in self.case.bundle.bank}
+        for bank_id in exc.candidates:
+            credit = by_id.get(bank_id)
+            if not credit or digits not in credit.narration:
+                continue
+            # The token immediately before the digits is the bank's label.
+            before = credit.narration.upper().split(digits)[0].rstrip(" :-/#")
+            marker = before.split()[-1] if before.split() else ""
+            if not marker or marker.isdigit():
+                continue
+            return {
+                "defect_class": DefectClass.NARRATION_DRIFT.value,
+                "proposed_rule": {
+                    "kind": "narration_alias",
+                    "params": {"marker": marker, "prefix": "UTR"},
+                    "confidence": 0.95,
+                },
+            }
+        return None
 
 
 @dataclass
@@ -242,13 +330,19 @@ def _learn_from_reviews(
         params = proposal.get("params") or {}
         # One rule per pattern per month. Ten AXIS shortfalls are ten instances
         # of one lesson, not ten lessons.
-        fingerprint = f"{proposal.get('kind')}:{params.get('keyword')}"
+        fingerprint = (
+            f"{proposal.get('kind')}:"
+            f"{params.get('keyword') or params.get('marker') or params.get('bank')}"
+        )
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
 
         if any(
-            r.kind == proposal.get("kind") and r.params.get("keyword") == params.get("keyword")
+            r.kind == proposal.get("kind")
+            and r.params.get("keyword") == params.get("keyword")
+            and r.params.get("marker") == params.get("marker")
+            and r.params.get("bank") == params.get("bank")
             for r in store.rules
         ):
             continue  # already known
@@ -262,3 +356,15 @@ def _learn_from_reviews(
             confidence=float(proposal.get("confidence", 0.9)),
         )
         store.propose(candidate, history)
+
+
+def _bank_from_narration(narration: str) -> str:
+    """Best-effort bank identifier from a narration, for labelling a timing rule.
+
+    Only ever used as a rule parameter for provenance and dedup - never to
+    decide a match - so an unknown bank is recorded as such rather than guessed.
+    """
+    for name in ("HDFC", "ICICI", "AXIS", "SBI", "KOTAK", "KKBK"):
+        if name in narration.upper():
+            return "KOTAK" if name == "KKBK" else name
+    return "UNKNOWN"
