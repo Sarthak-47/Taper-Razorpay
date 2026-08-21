@@ -136,6 +136,8 @@ class DefectRates:
     split_settlement: float = 0.15
     unrecorded_adjustment: float = 0.10
     missing_ledger_entry: float = 0.02
+    unsettled_revenue: float = 0.02
+    chargeback_hold: float = 0.02
 
 
 @dataclass
@@ -291,6 +293,54 @@ def generate(
                         DefectClass.DUPLICATE_CAPTURE,
                         dup_id,
                         {"original_txn_id": txn_id, "order_id": order_id, "amount": str(gross)},
+                    )
+                )
+
+            # --- chargeback_hold: gateway withholds pending a dispute ---------
+            if rng.random() < rates.chargeback_hold:
+                counter += 1
+                hold_id = f"hold_{seed}_{counter:05d}"
+                hold_amt = (gross / Money("2")).quantize(Money("0.01"))
+                rows.append(
+                    SettlementRow(
+                        txn_id=hold_id,
+                        settlement_batch_id=batch_id,
+                        utr=utr,
+                        txn_type=TxnType.CHARGEBACK_HOLD,
+                        gross_amount=hold_amt,
+                        fee=Money("0.00"),
+                        gst_on_fee=Money("0.00"),
+                        settled_on=settled_on,
+                        order_id=order_id,
+                        method=method,
+                    )
+                )
+                defects.append(
+                    InjectedDefect(
+                        DefectClass.CHARGEBACK_HOLD, hold_id,
+                        {"amount": str(hold_amt), "order_id": order_id},
+                    )
+                )
+
+            # --- unsettled_revenue: sold, recorded, never paid for ------------
+            # The ledger entry exists and no settlement row ever follows it.
+            if rng.random() < rates.unsettled_revenue:
+                counter += 1
+                orphan_txn = f"pay_{seed}_{counter:05d}"
+                orphan_order = f"ord_{seed}_{counter:05d}"
+                orphan_amt = _money(rng, 250, 12000)
+                ledger.append(
+                    LedgerEntry(
+                        order_id=orphan_order,
+                        txn_id=orphan_txn,
+                        amount=orphan_amt,
+                        created_at=settled_on - timedelta(days=2),
+                    )
+                )
+                defects.append(
+                    InjectedDefect(
+                        DefectClass.UNSETTLED_REVENUE, orphan_txn,
+                        {"amount": str(orphan_amt), "order_id": orphan_order},
                     )
                 )
 

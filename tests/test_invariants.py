@@ -1107,3 +1107,68 @@ def test_digest_survives_reordering() -> None:
     shuffled.matches.reverse()
     shuffled.exceptions.reverse()
     assert attest(shuffled).digest == attest(result).digest
+
+
+# ---------------------------------------------------------------------------
+# Claim: "matching is indexed for speed without changing what it decides"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_no_bank_credit_is_claimed_twice(seed: int) -> None:
+    """The property a broken index would violate.
+
+    Matching moved from rescanning a list of unclaimed credits to two indexes
+    plus a claimed-set, because the list version was quadratic. The risk in
+    that change is a credit being handed to two batches - which would inflate
+    the match rate and reconcile money twice.
+    """
+    case = generate(n_batches=60, seed=seed)
+    matches, _, _ = run_deterministic(case.bundle)
+
+    used: list[str] = [bid for m in matches for bid in m.bank_txn_ids]
+    assert len(used) == len(set(used)), "a bank credit was claimed by two batches"
+
+    known = {c.bank_txn_id for c in case.bundle.bank}
+    assert set(used) <= known, "a match referenced a credit that does not exist"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_every_credit_is_either_matched_or_reported(seed: int) -> None:
+    """No bank credit may simply vanish.
+
+    A credit that is neither attached to a batch nor raised as unclaimed is
+    money the close silently ignored, which is the one outcome a reconciliation
+    tool must never produce.
+    """
+    case = generate(n_batches=40, seed=seed)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+
+    matched = {bid for m in result.matches for bid in m.bank_txn_ids}
+    reported = {e.subject_id for e in result.exceptions}
+    for credit in case.bundle.bank:
+        assert credit.bank_txn_id in matched or credit.bank_txn_id in reported, (
+            f"{credit.bank_txn_id} was neither matched nor reported"
+        )
+
+
+def test_matching_cost_stays_linear() -> None:
+    """Per-record cost must not climb with input size.
+
+    `taper bench` caught the original quadratic scan - 2.5us per record at 1.4k
+    records, 13.3us at 68k. This guards the fix, with a loose bound so it fails
+    on a regression rather than on a busy machine.
+    """
+    import time
+
+    def per_record(batches: int) -> float:
+        case = generate(n_batches=batches, seed=99)
+        started = time.perf_counter()
+        run_deterministic(case.bundle)
+        return (time.perf_counter() - started) / len(case.bundle)
+
+    small = per_record(50)
+    large = per_record(800)
+    assert large < small * 4, (
+        f"per-record cost grew {large / small:.1f}x over a 16x larger input - "
+        f"matching has gone super-linear again"
+    )

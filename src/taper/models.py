@@ -52,6 +52,13 @@ class DefectClass(StrEnum):
     SPLIT_SETTLEMENT = "split_settlement"
     UNRECORDED_ADJUSTMENT = "unrecorded_adjustment"
     MISSING_LEDGER_ENTRY = "missing_ledger_entry"
+    # The merchant sold something and was never paid for it. Commercially the
+    # most important class here - every other defect is money in the wrong
+    # place, this one is money that never arrived.
+    UNSETTLED_REVENUE = "unsettled_revenue"
+    # Money the gateway is holding back pending a dispute. Not lost, not
+    # available, and invisible in the payout unless someone looks for it.
+    CHARGEBACK_HOLD = "chargeback_hold"
 
 
 @dataclass(frozen=True)

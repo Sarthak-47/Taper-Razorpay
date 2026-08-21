@@ -344,6 +344,14 @@ DEFECT_MEANING: dict[DefectClass, tuple[str, str]] = {
         "Bank deducted more than the report explains",
         "Query with the bank, or learn it as a standing charge",
     ),
+    DefectClass.UNSETTLED_REVENUE: (
+        "Sold and recorded, never paid for",
+        "Chase the gateway - this is money that never arrived",
+    ),
+    DefectClass.CHARGEBACK_HOLD: (
+        "Gateway withholding pending a dispute",
+        "Not lost, not available - exclude from the cash position",
+    ),
     DefectClass.MISSING_LEDGER_ENTRY: (
         "Money settled with no order behind it",
         "Unrecorded revenue - find the order",

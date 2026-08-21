@@ -394,6 +394,45 @@ def _risk_for_report(case, result, args) -> dict | None:
     }
 
 
+def cmd_bench(args) -> None:
+    """Throughput at volume, which is a stated bar and was never measured.
+
+    The report has always printed records/sec, but on ~1,300 records that
+    answers "is it fast" and not "would it survive my month". Scaling the batch
+    count is also the honest way to find out whether anything in the matcher is
+    quadratic - the subset search is bounded, but the batch-to-credit loop is
+    not obviously linear until it is measured.
+    """
+    import time
+
+    from .attest import attest
+
+    print(BAR)
+    print("  THROUGHPUT - deterministic layers, no model in the loop")
+    print(BAR)
+    print(f"  {'batches':>9}{'records':>10}{'seconds':>10}{'records/sec':>14}"
+          f"{'us/record':>12}{'exceptions':>12}")
+
+    previous: tuple[int, float] | None = None
+    for batches in args.sizes:
+        case = generate(n_batches=batches, seed=args.seed)
+        started = time.perf_counter()
+        result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+        elapsed = time.perf_counter() - started
+        records = len(case.bundle)
+        rate = records / elapsed if elapsed else float("inf")
+        print(f"  {batches:>9}{records:>10}{elapsed:>10.3f}{rate:>14,.0f}"
+              f"{elapsed / records * 1e6:>12.1f}{len(result.exceptions):>12}")
+        previous = (records, elapsed)
+
+    if previous:
+        print(f"\n  digest at the largest size: {attest(result).short}")
+    print("\n  Per-record cost should stay flat as the input grows. If it climbs")
+    print("  with size, something in the matcher is super-linear and a real")
+    print("  month would find it before a reviewer did.")
+    print(BAR)
+
+
 def cmd_export(args) -> None:
     """Write a generated period out as CSV, so the expected shape is concrete."""
     from .io import write_bundle
@@ -706,6 +745,11 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    bn = sub.add_parser("bench", parents=[shared], help="throughput as the input grows")
+    bn.add_argument("--seed", type=int, default=99)
+    bn.add_argument("--sizes", type=int, nargs="+", default=[40, 200, 800, 2000])
+    bn.set_defaults(func=cmd_bench)
 
     ex = sub.add_parser("export", parents=[shared], help="write a period out as CSV")
     ex.add_argument("--seed", type=int, default=99)

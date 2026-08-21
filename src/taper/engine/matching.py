@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from datetime import timedelta
 from decimal import Decimal
 from itertools import combinations
+from typing import Any
 
 from ..models import (
     AMOUNT_TOLERANCE,
@@ -58,6 +59,11 @@ SYSTEMATIC_RATE_MIN_SHARE = 0.5
 # stale rather than the payout odd. One mismatch proves nothing; a repeated one
 # is the world having moved.
 STALE_RULE_MIN_ROWS = 2
+
+# How long an order may sit unsettled before it counts as unpaid rather than
+# merely recent. Wider than MAX_SETTLEMENT_LAG on purpose: the cost of asking
+# early about a sale that was always going to settle is a wasted investigation.
+SETTLEMENT_HORIZON = timedelta(days=7)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +261,76 @@ def check_ledger_coverage(
     return findings
 
 
+def check_unsettled_revenue(bundle: SourceBundle) -> list[Finding]:
+    """Orders the merchant recorded and was never paid for.
+
+    Commercially the most important thing here. Every other class is money in
+    the wrong place; this is money that never arrived.
+
+    The nuance is aging. An order captured yesterday has not settled *yet* and
+    flagging it would bury the real cases in noise, so only entries older than
+    the settlement window count. A tool that cries wolf about every recent sale
+    gets muted in a week.
+    """
+    if not bundle.ledger:
+        return []
+
+    settled = {r.txn_id for r in bundle.settlement}
+    # The period's own horizon, not today's date: a close is re-run months
+    # later and must reach the same answer it did on the day.
+    latest = max((r.settled_on for r in bundle.settlement), default=None)
+    if latest is None:
+        return []
+    cutoff = latest - SETTLEMENT_HORIZON
+
+    findings: list[Finding] = []
+    for entry in bundle.ledger:
+        if entry.txn_id in settled or entry.created_at > cutoff:
+            continue
+        findings.append(
+            Finding(
+                defect_class=DefectClass.UNSETTLED_REVENUE,
+                subject_id=entry.txn_id,
+                layer=Layer.L0_EXACT,
+                confidence=1.0,
+                money_impact=entry.amount,
+                evidence={
+                    "order_id": entry.order_id,
+                    "amount": str(entry.amount),
+                    "created_at": str(entry.created_at),
+                    "aged_days": (latest - entry.created_at).days,
+                    "status": entry.status,
+                },
+            )
+        )
+    return findings
+
+
+def check_chargeback_holds(bundle: SourceBundle) -> list[Finding]:
+    """Money the gateway is withholding pending a dispute.
+
+    Not lost and not available, and invisible in the payout total unless
+    somebody looks for it. Reported because a cash position that counts held
+    money as received is wrong in the direction that hurts.
+    """
+    return [
+        Finding(
+            defect_class=DefectClass.CHARGEBACK_HOLD,
+            subject_id=row.txn_id,
+            layer=Layer.L0_EXACT,
+            confidence=1.0,
+            money_impact=row.gross_amount,
+            evidence={
+                "order_id": row.order_id or "",
+                "amount": str(row.gross_amount),
+                "batch": row.settlement_batch_id,
+            },
+        )
+        for row in bundle.settlement
+        if row.txn_type is TxnType.CHARGEBACK_HOLD
+    ]
+
+
 def check_cross_cycle_refunds(bundle: SourceBundle) -> list[Finding]:
     """A refund settling in a different batch than the payment it reverses."""
     payment_batch: dict[str, str] = {
@@ -388,7 +464,25 @@ def match_batches(
     matches: list[BatchMatch] = []
     findings: list[Finding] = []
     exceptions: list[Exception_] = []
-    unclaimed: list[BankCredit] = list(bundle.bank)
+    # Two indexes and a claimed-set, built once.
+    #
+    # The obvious implementation - a list of unclaimed credits, rescanned per
+    # batch - is quadratic, and `taper bench` found it: per-record cost went
+    # from 2.5us at 1.4k records to 13.3us at 68k, a 5x degradation that a real
+    # month would have hit long before a reviewer did. Worse, the UTR scan ran
+    # a regex against every unclaimed credit for every batch.
+    #
+    # Indexing by reference and by value date makes both lookups proportional
+    # to the candidates that could actually match, and membership in a set
+    # replaces O(n) list removal.
+    claimed: set[str] = set()
+    by_utr: dict[str, list[BankCredit]] = defaultdict(list)
+    by_date: dict[Any, list[BankCredit]] = defaultdict(list)
+    for credit in bundle.bank:
+        by_date[credit.value_date].append(credit)
+        found = extract_utr(credit, store)
+        if found:
+            by_utr[found].append(credit)
 
     for batch_id, expected in nets.items():
         settled_on = batch_dates[batch_id]
@@ -396,11 +490,11 @@ def match_batches(
 
         # --- 1. UTR join ---------------------------------------------------
         if utr:
-            hits = [c for c in unclaimed if extract_utr(c, store) == utr]
+            hits = [c for c in by_utr.get(utr, []) if c.bank_txn_id not in claimed]
             if hits:
                 credited = sum((c.credit_amount for c in hits), Money("0.00"))
                 for c in hits:
-                    unclaimed.remove(c)
+                    claimed.add(c.bank_txn_id)
                 # A batch whose entire shortfall is a charge we already
                 # understand is reconciled, not broken. Scoring it as unclean
                 # would permanently cap the match rate at the fraction of banks
@@ -463,13 +557,15 @@ def match_batches(
         # guesswork and the subset search into a combinatorial problem.
         lag = MAX_SETTLEMENT_LAG + timedelta(days=_learned_extra_lag(batch_id, store))
         window = [
-            c for c in unclaimed
-            if settled_on <= c.value_date <= settled_on + lag
+            c
+            for offset in range(lag.days + 1)
+            for c in by_date.get(settled_on + timedelta(days=offset), [])
+            if c.bank_txn_id not in claimed
         ]
         exact = [c for c in window if abs(c.credit_amount - expected) <= AMOUNT_TOLERANCE]
         if len(exact) == 1:
             c = exact[0]
-            unclaimed.remove(c)
+            claimed.add(c.bank_txn_id)
             matches.append(
                 BatchMatch(
                     batch_id=batch_id, bank_txn_ids=[c.bank_txn_id],
@@ -491,7 +587,7 @@ def match_batches(
                 continue
             adj, rule_id = hit
             if abs(c.credit_amount - (expected - adj)) <= AMOUNT_TOLERANCE:
-                unclaimed.remove(c)
+                claimed.add(c.bank_txn_id)
                 matches.append(
                     BatchMatch(
                         batch_id=batch_id, bank_txn_ids=[c.bank_txn_id],
@@ -543,7 +639,7 @@ def match_batches(
         if subset:
             credited = sum((c.credit_amount for c in subset), Money("0.00"))
             for c in subset:
-                unclaimed.remove(c)
+                claimed.add(c.bank_txn_id)
             effective = expected - (applied_adj[0] if applied_adj else Money("0.00"))
             matches.append(
                 BatchMatch(
@@ -607,7 +703,7 @@ def match_batches(
             )
         )
 
-    for leftover in unclaimed:
+    for leftover in (c for c in bundle.bank if c.bank_txn_id not in claimed):
         exceptions.append(
             Exception_(
                 subject_id=leftover.bank_txn_id,
@@ -867,6 +963,8 @@ def run_deterministic(
     findings += check_ledger_coverage(bundle, {f.subject_id for f in dup_findings})
 
     findings += check_cross_cycle_refunds(bundle)
+    findings += check_unsettled_revenue(bundle)
+    findings += check_chargeback_holds(bundle)
 
     matches, match_findings, exceptions = match_batches(bundle, store)
     findings += match_findings
