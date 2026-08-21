@@ -78,6 +78,12 @@ class SettlementRow:
     gst_on_fee: Money
     settled_on: date
     order_id: str | None = None
+    # Real merchants are on a rate card, not one rate: UPI, domestic cards and
+    # international cards are all priced differently. The settlement report
+    # names the method but never the contracted rate for it, which is why a
+    # legitimately higher fee is indistinguishable from an overcharge until
+    # somebody tells the system what the rate card says.
+    method: str = "card"
 
     @property
     def net_amount(self) -> Money:

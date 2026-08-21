@@ -79,6 +79,29 @@ BANK_PROFILES = [
     ),
 ]
 
+# The merchant's rate card. The base rate applies to most methods; international
+# cards genuinely cost more. Nothing in the settlement report says so, so a 3%
+# fee on an international card looks exactly like a 3% overcharge on a domestic
+# one until the rate card is learned.
+METHOD_RATES = {
+    "upi": Decimal("0.02"),
+    "card": Decimal("0.02"),
+    "netbanking": Decimal("0.02"),
+    "intl_card": Decimal("0.03"),
+}
+METHOD_WEIGHTS = [("upi", 0.45), ("card", 0.35), ("netbanking", 0.12), ("intl_card", 0.08)]
+
+
+def _pick_method(rng: random.Random) -> str:
+    roll = rng.random()
+    cumulative = 0.0
+    for name, weight in METHOD_WEIGHTS:
+        cumulative += weight
+        if roll < cumulative:
+            return name
+    return "card"
+
+
 NARRATION_NO_UTR = [
     "NEFT CR-RAZORPAY SOFTWARE PVT LTD-SETTLEMENT",
     "MERCHANT SETTLEMENT CREDIT",
@@ -187,20 +210,25 @@ def generate(
             txn_id = f"pay_{seed}_{counter:05d}"
             order_id = f"ord_{seed}_{counter:05d}"
             gross = _money(rng, 250, 12000)
-            fee, gst = _fee_for(gross)
+            method = _pick_method(rng)
+            fee, gst = _fee_for(gross, METHOD_RATES[method])
 
             # --- fee_overcharge: PG quietly bills above the contracted rate ---
             if rng.random() < rates.fee_overcharge:
-                bad_rate = CONTRACTED_FEE_RATE + Decimal(str(rng.choice([0.003, 0.005, 0.01])))
+                # An overcharge is measured against the method's *own* rate, not
+                # the base rate - otherwise every international card would count
+                # as one, and the label would be meaningless.
+                bad_rate = METHOD_RATES[method] + Decimal(str(rng.choice([0.003, 0.005, 0.01])))
                 fee, gst = _fee_for(gross, bad_rate)
-                fair_fee, fair_gst = _fee_for(gross)
+                fair_fee, fair_gst = _fee_for(gross, METHOD_RATES[method])
                 defects.append(
                     InjectedDefect(
                         DefectClass.FEE_OVERCHARGE,
                         txn_id,
                         {
                             "charged_rate": str(bad_rate),
-                            "contracted_rate": str(CONTRACTED_FEE_RATE),
+                            "contracted_rate": str(METHOD_RATES[method]),
+                            "method": method,
                             "overcharge": str((fee + gst) - (fair_fee + fair_gst)),
                         },
                     )
@@ -217,6 +245,7 @@ def generate(
                     gst_on_fee=gst,
                     settled_on=settled_on,
                     order_id=order_id,
+                    method=method,
                 )
             )
 
