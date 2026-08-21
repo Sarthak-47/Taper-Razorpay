@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..models import Money, SourceBundle
+from . import sanitize
 from .llm import LLMClient, get_client, to_finding, verify_proposal
 from .matching import batch_nets, run_deterministic
 from .results import Exception_, Layer, ReconResult
@@ -54,6 +55,22 @@ def reconcile(
         records_processed=len(bundle),
     )
 
+    # --- report attacker-shaped narrations --------------------------------
+    # An exception, not a finding: it needs a human, and the generator does not
+    # inject this class, so emitting a finding would be a false positive by
+    # construction and would break the precision guarantee everything else rests on.
+    for credit in bundle.bank:
+        hits = sanitize.scan(credit.narration)
+        if hits:
+            result.exceptions.append(
+                Exception_(
+                    subject_id=credit.bank_txn_id,
+                    kind="suspicious_narration",
+                    context={"patterns": ",".join(hits), "narration": credit.narration[:200]},
+                    reason=sanitize.describe(hits),
+                )
+            )
+
     # --- layer 2: rules learned from previous closes ----------------------
     still_open: list[Exception_] = []
     for exc in exceptions:
@@ -71,7 +88,11 @@ def reconcile(
 
     # --- layer 3: the model, on whatever is left --------------------------
     if not config.use_llm or not still_open:
-        result.exceptions = still_open
+        # extend, never assign: anything already queued - notably the
+        # suspicious-narration warnings raised above - would otherwise be
+        # silently discarded on every deterministic-only run, which is exactly
+        # the path a security warning most needs to survive.
+        result.exceptions.extend(still_open)
         result.elapsed_s = time.perf_counter() - started
         return result
 
@@ -79,12 +100,16 @@ def reconcile(
     history = build_history(result.findings, bundle)
 
     for exc in still_open:
+        # Narrations are attacker-influenced text on their way into a prompt.
+        # Neutralised here rather than at the edge, because the deterministic
+        # layers match on the raw string and must keep seeing it unchanged -
+        # only the model gets the defanged version.
         candidates = [
             {
                 "bank_txn_id": bid,
                 "amount": str(credit_amounts[bid]),
                 "value_date": str(bank_by_id[bid].value_date),
-                "narration": bank_by_id[bid].narration,
+                "narration": sanitize.neutralise(bank_by_id[bid].narration),
             }
             for bid in exc.candidates
             if bid in credit_amounts
