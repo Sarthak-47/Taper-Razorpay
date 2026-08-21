@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest --cov --cov-report=term-missing
+
+      # The pipeline must stay runnable with no API key. If these break, a
+      # reviewer cloning the repo cannot reproduce a single number in the README.
+      - name: Smoke - deterministic reconciliation
+        run: python -m taper.cli --no-llm reconcile --seed 99
+
+      - name: Smoke - ablation
+        run: python -m taper.cli --mock ablate --seed 99
+
+      - name: Smoke - rule-growth campaign
+        run: python -m taper.cli --mock campaign --months 3 --average-runs 3
+
+  metrics:
+    name: verify reported metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # Guards the headline claims in the README. If precision ever drops below
+      # 1.000 on a held-out seed, or the campaign stops improving match rate,
+      # the README has become false and CI should say so.
+      - name: Assert README claims still hold
+        run: python -m pytest tests/ -k "precision or campaign or learning" -v
