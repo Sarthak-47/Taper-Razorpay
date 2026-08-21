@@ -234,3 +234,47 @@ def test_learning_reduces_load() -> None:
     first, later = rows[0], rows[-1]
     assert later.match_rate > first.match_rate
     assert later.exceptions < first.exceptions
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the close report is self-contained and honest about its resolver"
+# ---------------------------------------------------------------------------
+
+def test_report_is_self_contained() -> None:
+    """No external asset may be referenced - the report must open from disk,
+    offline, years from now. A chart that needs a CDN is not a work product."""
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score
+    from taper.report import render
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, score(case, result, "mock:offline-heuristic"), case, "2026-06")
+
+    # The SVG xmlns is a namespace identifier, not a fetch, so it is stripped
+    # before checking. Everything else that looks like a URL is a real dependency
+    # on the network and must not exist.
+    stripped = html.replace('xmlns="http://www.w3.org/2000/svg"', "")
+
+    for forbidden in ("http://", "https://", "<script", "cdn.", "<link", "@import"):
+        assert forbidden not in stripped, f"report references external resource: {forbidden}"
+    assert "<svg" in html and "</html>" in html
+
+
+def test_report_warns_when_run_on_the_mock() -> None:
+    """A reader must never mistake heuristic output for model output."""
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score
+    from taper.report import render
+
+    case = generate(n_batches=15, seed=7)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, score(case, result, "mock:offline-heuristic"), case, "2026-06")
+    assert "Offline heuristic, not a model" in html
+
+
+def test_report_escapes_untrusted_text() -> None:
+    """Bank narrations are external input and land in the report verbatim."""
+    from taper.report import _esc
+
+    assert _esc("<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
