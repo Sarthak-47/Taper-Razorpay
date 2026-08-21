@@ -1312,3 +1312,50 @@ def test_unreachable_provider_degrades_to_an_exception() -> None:
     assert out["defect_class"] == "unknown"
     assert out["confidence"] == 0.0
     assert "unreachable" in out["reasoning"]
+
+
+def test_concurrency_does_not_change_the_close() -> None:
+    """Overlapping the model calls must not shuffle the result.
+
+    Verification, the exception list and rule admission all depend on sequence.
+    If concurrency leaked into the ordering, the close would vary with thread
+    scheduling and the digest would move - and a close that changes between
+    identical runs cannot be signed off.
+    """
+    from taper.attest import attest
+    from taper.engine.llm import MockClient
+
+    case = generate(n_batches=40, seed=99)
+    digests = set()
+    for workers in (1, 2, 8):
+        cfg = RunConfig(use_llm=True, llm_concurrency=workers)
+        result = reconcile(case.bundle, config=cfg, client=MockClient())
+        digests.add(attest(result).digest)
+    assert len(digests) == 1, "the close changed with the number of workers"
+
+
+def test_a_failing_classification_does_not_abort_the_close() -> None:
+    """One misbehaving call costs a human review, never the reconciliation."""
+    from taper.engine.pipeline import _classify_all
+    from taper.engine.results import Exception_
+
+    class Exploding:
+        name = "exploding"
+
+        def classify(self, exc, context):
+            if exc.subject_id == "boom":
+                raise RuntimeError("provider melted")
+            return {"defect_class": "unknown", "bank_txn_ids": [], "confidence": 0.1,
+                    "reasoning": "fine", "proposed_rule": None}
+
+    excs = [
+        Exception_(subject_id="ok1", kind="unmatched_batch", reason="x"),
+        Exception_(subject_id="boom", kind="unmatched_batch", reason="x"),
+        Exception_(subject_id="ok2", kind="unmatched_batch", reason="x"),
+    ]
+    out = _classify_all(Exploding(), excs, [{"candidates": []}] * 3, workers=4)
+
+    assert len(out) == 3, "a failure lost a result and broke the pairing"
+    assert "classification failed" in out[1]["reasoning"]
+    assert out[1]["confidence"] == 0.0
+    assert out[0]["reasoning"] == "fine" and out[2]["reasoning"] == "fine"

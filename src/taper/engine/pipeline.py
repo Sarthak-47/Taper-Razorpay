@@ -33,6 +33,10 @@ class RunConfig:
     # implementation detail on purpose - every provider goes through the same
     # verification gate, so none of them can change what becomes a finding.
     provider: str = "anthropic"
+    # Layer 3 calls overlap. Modest by default: a local model is usually the
+    # provider here and swamping it with parallel requests makes every one of
+    # them slower, not just the extras.
+    llm_concurrency: int = 4
     llm_base_url: str | None = None
     llm_model: str | None = None
 
@@ -107,22 +111,37 @@ def reconcile(
     )
     history = build_history(result.findings, bundle)
 
-    for exc in still_open:
-        # Narrations are attacker-influenced text on their way into a prompt.
-        # Neutralised here rather than at the edge, because the deterministic
-        # layers match on the raw string and must keep seeing it unchanged -
-        # only the model gets the defanged version.
-        candidates = [
-            {
-                "bank_txn_id": bid,
-                "amount": str(credit_amounts[bid]),
-                "value_date": str(bank_by_id[bid].value_date),
-                "narration": sanitize.neutralise(bank_by_id[bid].narration),
-            }
-            for bid in exc.candidates
-            if bid in credit_amounts
-        ]
-        proposal = client.classify(exc, {"candidates": candidates})
+    # Narrations are attacker-influenced text on their way into a prompt.
+    # Neutralised here rather than at the edge, because the deterministic
+    # layers match on the raw string and must keep seeing it unchanged - only
+    # the model gets the defanged version.
+    payloads = [
+        {
+            "candidates": [
+                {
+                    "bank_txn_id": bid,
+                    "amount": str(credit_amounts[bid]),
+                    "value_date": str(bank_by_id[bid].value_date),
+                    "narration": sanitize.neutralise(bank_by_id[bid].narration),
+                }
+                for bid in exc.candidates
+                if bid in credit_amounts
+            ]
+        }
+        for exc in still_open
+    ]
+
+    # Classification is independent per exception and entirely I/O-bound, so
+    # the calls overlap. A local model answers in ~14s; thirteen of those in
+    # series is three minutes of a close spent waiting on one optional layer.
+    #
+    # Only the *calls* are concurrent. Every result is then consumed in the
+    # original order, because verification, the exception list and rule
+    # admission all depend on sequence - a close whose output shuffled with
+    # thread scheduling could not be signed off, and the digest would move.
+    proposals = _classify_all(client, still_open, payloads, config.llm_concurrency)
+
+    for exc, proposal in zip(still_open, proposals, strict=True):
         result.llm_calls += 1
 
         if float(proposal.get("confidence", 0)) < config.confidence_floor:
@@ -155,6 +174,41 @@ def reconcile(
 
     result.elapsed_s = time.perf_counter() - started
     return result
+
+
+def _classify_all(
+    client: LLMClient,
+    exceptions: list[Exception_],
+    payloads: list[dict[str, Any]],
+    workers: int,
+) -> list[dict[str, Any]]:
+    """Classify every open exception, overlapping the calls, order preserved.
+
+    A failed call becomes an "unknown" rather than an exception that unwinds the
+    close. One optional layer misbehaving must cost a few more human reviews,
+    never the whole reconciliation.
+    """
+    if workers <= 1 or len(exceptions) < 2:
+        return [client.classify(e, p) for e, p in zip(exceptions, payloads, strict=True)]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(pair: tuple[Exception_, dict[str, Any]]) -> dict[str, Any]:
+        exc, payload = pair
+        try:
+            return client.classify(exc, payload)
+        except Exception as err:  # noqa: BLE001 - an optional layer must not abort a close
+            return {
+                "defect_class": "unknown",
+                "bank_txn_ids": [],
+                "confidence": 0.0,
+                "reasoning": f"classification failed: {type(err).__name__}",
+                "proposed_rule": None,
+            }
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(exceptions))) as pool:
+        # executor.map preserves input order regardless of completion order.
+        return list(pool.map(one, zip(exceptions, payloads, strict=True)))
 
 
 def _context_for(exc: Exception_, bank_by_id) -> dict[str, Any]:
