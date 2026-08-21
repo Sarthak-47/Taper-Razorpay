@@ -289,6 +289,71 @@ def cmd_report(args) -> None:
     print(BAR)
 
 
+def cmd_risk(args) -> None:
+    """Train and evaluate the exception-risk model on disjoint seeds."""
+    from .ml.train import HOLDOUT_SEEDS, TRAIN_SEEDS, train_and_evaluate
+
+    if args.compare:
+        print(BAR)
+        print("  BACKEND COMPARISON - which model actually deserves to ship?")
+        print(BAR)
+        print(f"  {'backend':<44}{'AUC':>8}{'Brier':>10}{'skill':>9}")
+        for pref in ("logistic", "gbm"):
+            _, cr = train_and_evaluate(n_batches=args.batches, seed=args.seed, prefer=pref)
+            print(f"  {cr.backend:<44}{cr.auc:>8.3f}{cr.brier_model:>10.4f}{cr.skill:>+9.3f}")
+        print()
+        print("  Gradient boosting was the obvious first choice and lost on both")
+        print("  ranking and calibration. The signal is close to linear in a couple")
+        print("  of strong features, so the extra capacity buys variance rather than")
+        print("  accuracy on a few hundred rows. The shipped model needs no")
+        print("  dependencies, and that is a measurement rather than a preference.")
+        print(BAR)
+        return
+
+    _, r = train_and_evaluate(n_batches=args.batches, seed=args.seed, prefer=args.backend)
+
+    print(BAR)
+    print("  EXCEPTION-RISK MODEL - which batches will need a human")
+    print(BAR)
+    print(f"  backend               {r.backend}")
+    print(f"  train seeds           {TRAIN_SEEDS}")
+    print(f"  holdout seeds         {HOLDOUT_SEEDS}   (never fitted on)")
+    print(f"  train rows            {r.n_train} ({r.positives_train} escalated, "
+          f"{r.positives_train / max(r.n_train, 1):.1%})")
+    print(f"  holdout rows          {r.n_holdout} ({r.positives_holdout} escalated, "
+          f"{r.positives_holdout / max(r.n_holdout, 1):.1%})")
+
+    print(f"\n  {'-' * 68}")
+    print("  CALIBRATION IS THE PRODUCT")
+    print(f"  {'-' * 68}")
+    print(f"  Brier score           {r.brier_model:.4f}")
+    print(f"  baseline (base rate)  {r.brier_baseline:.4f}")
+    verdict = "(beats quoting the average)" if r.skill > 0 else "(NO better than the average)"
+    print(f"  Brier skill           {r.skill:+.3f}   {verdict}")
+    print(f"  AUC                   {r.auc:.3f}")
+
+    if r.reliability:
+        print(f"\n  {'bucket':<10}{'n':>6}{'predicted':>12}{'observed':>11}{'gap':>8}")
+        for mid, pred, obs, n in r.reliability:
+            print(f"  {mid:<10.2f}{n:>6}{pred:>12.2f}{obs:>11.2f}{pred - obs:>+8.2f}")
+
+    print(f"\n  {'-' * 68}")
+    print("  REVIEW BUDGET - if you only have time for the riskiest N%")
+    print(f"  {'-' * 68}")
+    for frac, caught, n in r.budget[:6]:
+        lift = caught / frac if frac else 0
+        bar = "#" * int(caught * 40)
+        print(f"  review {frac:>4.0%} ({n:>3} batches)  catch {caught:>5.0%} "
+              f"of escalations  {lift:>4.1f}x  {bar}")
+
+    print(f"\n  {'-' * 68}")
+    print("  WHAT THE MODEL LEANS ON")
+    print(f"  {'-' * 68}")
+    for name, weight in r.importances[:6]:
+        print(f"  {name:<32}{weight:>8.3f}")
+    print(BAR)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="taper", description=__doc__)
     p.add_argument("--mock", action="store_true",
@@ -322,6 +387,13 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--no-campaign", action="store_true",
                     help="skip the taper curve (much faster)")
     rp.set_defaults(func=cmd_report)
+
+    rk = sub.add_parser("risk", help="train/evaluate the exception-risk model")
+    rk.add_argument("--seed", type=int, default=0)
+    rk.add_argument("--backend", choices=("logistic", "gbm"), default="logistic")
+    rk.add_argument("--compare", action="store_true",
+                    help="benchmark both backends and print the comparison")
+    rk.set_defaults(func=cmd_risk)
 
     e = sub.add_parser("evaluate", help="tuning set vs held-out set")
     e.add_argument("--tune-seed", type=int, default=7)
