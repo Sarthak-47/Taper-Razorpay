@@ -6,6 +6,52 @@ Razorpay AI Buildathon — Track 04, AI Finance Controller.
 
 ---
 
+## Review this in five minutes
+
+A merchant's settlement report, their bank statement and their own ledger never
+agree. Taper reconciles all three, reports what is wrong, and is honest about
+what it could not resolve. **Every exception a human answers is compiled into a
+typed, regression-tested rule — so it calls the model less every month while
+getting more accurate.**
+
+```bash
+python -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"
+```
+
+```bash
+python -m taper.cli campaign --months 6 --average-runs 8
+```
+
+That one command reproduces the headline result. **No API key needed** — the
+deterministic layers and the offline mock have zero third-party dependencies.
+
+| | Month 1 | Month 6 |
+|---|---|---|
+| Model calls / 100 records | 0.97 | **0.60** *(−39%)* |
+| Clean match rate | 63.5% | **96.6%** |
+| Human reviews per close | 11.2 | **7.5** |
+| **Precision** | **1.000** | **1.000** |
+
+Four more things worth thirty seconds each:
+
+| Command | What it shows |
+|---|---|
+| `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
+| `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
+| `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
+| `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+
+**Where to look in the code:** [`matching.py`](src/taper/engine/matching.py) is
+the deterministic core and its design rule; [`rules.py`](src/taper/engine/rules.py)
+is the learning loop and the gate that makes it safe;
+[`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
+overrules it.
+
+**56 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+guards a claim made below, so a failure means a sentence here has become false.
+
+---
+
 ## The problem
 
 A merchant on a payment gateway has three sources of truth that never agree:
