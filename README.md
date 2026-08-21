@@ -39,6 +39,7 @@ Four more things worth thirty seconds each:
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
 | `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
+| `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
 
 **Where to look in the code:** [`matching.py`](src/taper/engine/matching.py) is
@@ -47,7 +48,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**56 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**63 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -157,7 +158,7 @@ and what remains is month-to-month noise. Month 6 ticking back up from month 5
 is that noise, not decay — which is exactly why the table is averaged over eight
 campaigns and shows every month rather than the best one.
 
-Three patterns are learnable in this world, and the system finds them:
+Four patterns are learnable in this world, and the system finds them:
 
 | Rule | Learned | What it buys |
 |---|---|---|
@@ -177,6 +178,52 @@ window, which is uncommon. It is not carrying the result. The taper is driven by
 
 ```bash
 python -m taper.cli campaign --months 6 --average-runs 8
+```
+
+### Rule lifecycle — learn, drift, detect, retire, relearn
+
+A rule store that only grows is a liability. Everything above shows learning
+working; this shows what happens when what was learned **stops being true**.
+
+Before this existed, a bank changing its processing charge produced no signal at
+all. The stored rule kept matching the narration, quietly stopped explaining the
+money, and the batch became an ordinary exception — so a human re-investigated a
+solved problem every month with nothing pointing at the rule.
+
+AXIS reprices from ₹250 to ₹375 at month 4:
+
+| Month | Rules | Exceptions | Match rate | Event |
+|---|---|---|---|---|
+| 1 | 2 | 10 | 63.9% | |
+| 2 | 4 | 14 | 81.8% | |
+| 3 | 4 | **0** | 95.0% | steady state |
+| 4 | 4 | 11 | 86.1% | **← AXIS repriced** |
+| 5 | 4 | 7 | **100.0%** | relearned |
+| 6 | 4 | **2** | 94.9% | |
+
+```
+ACTIVE    adjustment_pattern_003   amount=375.00, keyword=PROC CHG
+RETIRED   adjustment_pattern_002   was 250.00 — superseded from stale::adjustment_pattern_002
+```
+
+The engine names the rule rather than failing the batch:
+
+> *Rule `adjustment_pattern_002` still matches these narrations but no longer
+> explains them: it stores 250.00 while 6 payouts are short by 375.00. The
+> underlying charge appears to have changed.*
+
+Two design choices carry this:
+
+- **Consistency, not count.** One payout disagreeing with a stored charge is an
+  odd payout; several agreeing on a *different* amount is the world having moved.
+  A single mismatch is left alone, and a test enforces that.
+- **Retirement is not deletion.** The old rule moves to a `retired` list with its
+  reason, so last quarter's close can still be explained. The replacement also
+  gets a **fresh id** — reissuing the retired one would make a rule and the thing
+  it replaced indistinguishable in any provenance trail.
+
+```bash
+python -m taper.cli drift
 ```
 
 ### Single-close accuracy

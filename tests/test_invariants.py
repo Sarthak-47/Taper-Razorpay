@@ -790,3 +790,98 @@ def test_report_states_when_nothing_has_been_learned() -> None:
     """A cold start must say so rather than showing an empty table."""
     html = _rendered(store=None)
     assert "cold start" in html.lower()
+
+
+# ---------------------------------------------------------------------------
+# Claim: "a rule that stops being true is noticed, not silently obeyed"
+# ---------------------------------------------------------------------------
+
+def test_stale_rule_is_named_when_a_bank_reprices() -> None:
+    """Learning is only half a lifecycle.
+
+    A store that can add rules but never question them turns confident the
+    moment the world moves. When a bank reprices, the stored charge keeps
+    matching the narration and stops explaining the money - and the engine has
+    to say *which rule* went stale, not just fail the batch.
+    """
+    from datetime import date
+
+    from taper.engine.rules import Rule, RuleStore
+
+    case = generate(n_batches=40, seed=99)
+    store = RuleStore()
+    store.rules.append(
+        Rule("adjustment_pattern_001", "adjustment_pattern",
+             {"keyword": "PROC CHG", "category": "bank_recurring_charge",
+              "amount": "300.00"},
+             "x", str(date(2026, 1, 1)))
+    )
+    result = reconcile(case.bundle, store=store, config=RunConfig(use_llm=False))
+
+    stale = [e for e in result.exceptions if e.kind == "stale_rule"]
+    assert stale, "a repriced charge went undetected"
+    assert stale[0].context["rule_id"] == "adjustment_pattern_001"
+    assert stale[0].context["stored_amount"] == "300.00"
+    assert stale[0].context["observed_amount"] == "250.00"
+
+
+def test_a_single_mismatch_is_not_called_staleness() -> None:
+    """One odd payout is not the world moving. Consistency is the whole signal."""
+    from datetime import date
+
+    from taper.engine.matching import check_rule_health
+    from taper.engine.results import BatchMatch, Layer
+    from taper.engine.rules import Rule, RuleStore
+    from taper.models import BankCredit, SourceBundle
+
+    store = RuleStore()
+    store.rules.append(
+        Rule("adjustment_pattern_001", "adjustment_pattern",
+             {"keyword": "PROC CHG", "category": "bank_recurring_charge",
+              "amount": "250.00"},
+             "x", str(date(2026, 1, 1)))
+    )
+    credit = BankCredit("b1", Money("900.00"), date(2026, 6, 1), "IMPS AXIS PROC CHG")
+    bundle = SourceBundle(bank=[credit])
+    one = [BatchMatch("s1", ["b1"], Money("1000.00"), Money("900.00"),
+                      Layer.L1_FUZZY, 0.9, "amount")]
+
+    assert not check_rule_health(one, bundle, store), "one mismatch called stale"
+
+
+def test_retiring_a_rule_keeps_the_record_and_frees_no_id() -> None:
+    """Retirement is not deletion, and the replacement gets a fresh identifier.
+
+    Reissuing the retired rule's id would make the replacement and the thing it
+    replaced indistinguishable in any provenance trail - exactly when someone
+    most needs to follow one.
+    """
+    from datetime import date
+
+    from taper.engine.rules import Rule, RuleStore, next_rule_id
+
+    store = RuleStore()
+    store.rules.append(
+        Rule("adjustment_pattern_001", "adjustment_pattern", {"amount": "250.00"},
+             "x", str(date(2026, 1, 1)))
+    )
+    store.retire("adjustment_pattern_001", "bank repriced")
+
+    assert len(store) == 0
+    assert len(store.retired) == 1
+    assert store.retired[0][0].params["amount"] == "250.00"
+    assert next_rule_id(store, "adjustment_pattern") == "adjustment_pattern_002"
+
+
+def test_campaign_recovers_after_a_repricing() -> None:
+    """End to end: learn, drift, detect, retire, relearn, recover."""
+    from taper.campaign import run_campaign
+
+    run = run_campaign(months=6, reprice=(4, "AXIS", Money("375.00")))
+
+    retired = [r for r, _ in run.store.retired]
+    assert retired, "nothing was retired despite a repricing"
+    assert any(r.params.get("amount") == "250.00" for r in retired)
+    assert any(
+        r.params.get("amount") == "375.00" for r in run.store.rules
+    ), "the new charge was never learned"
