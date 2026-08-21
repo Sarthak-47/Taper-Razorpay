@@ -275,10 +275,15 @@ def cmd_report(args) -> None:
             n_batches=args.batches, config=cfg,
         )
 
+    risk = None
+    if not args.no_risk:
+        print("  scoring batch risk ...", flush=True)
+        risk = _risk_for_report(case, result, args)
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
-        render(result, card, case, case.bundle.period, rows), encoding="utf-8"
+        render(result, card, case, case.bundle.period, rows, risk), encoding="utf-8"
     )
 
     print(BAR)
@@ -352,6 +357,37 @@ def cmd_risk(args) -> None:
     for name, weight in r.importances[:6]:
         print(f"  {name:<32}{weight:>8.3f}")
     print(BAR)
+
+
+def _risk_for_report(case, result, args) -> dict | None:
+    """Score this close's batches with a model trained on other periods.
+
+    The seed being reported on must not be one the model trained on, or the
+    "highest-risk batches" table would be the model recalling labels rather
+    than predicting them. Checked rather than assumed.
+    """
+    from .ml.features import build_dataset
+    from .ml.train import TRAIN_SEEDS, train_and_evaluate
+
+    if args.seed in TRAIN_SEEDS:
+        print(f"  !! seed {args.seed} is in TRAIN_SEEDS - skipping the risk section "
+              f"rather than reporting recalled labels as predictions", file=sys.stderr)
+        return None
+
+    model, report = train_and_evaluate(n_batches=args.batches)
+    X, y, ids = build_dataset(case, result)
+    probs = model.predict(X)
+    ranked = sorted(zip(ids, probs, y, strict=True), key=lambda t: -t[1])
+
+    return {
+        "brier": report.brier_model,
+        "baseline": report.brier_baseline,
+        "skill": report.skill,
+        "auc": report.auc,
+        "budget": report.budget,
+        "reliability": report.reliability,
+        "top": ranked,
+    }
 
 
 def cmd_stress(args) -> None:
@@ -436,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--average-runs", type=int, default=8)
     rp.add_argument("--no-campaign", action="store_true",
                     help="skip the taper curve (much faster)")
+    rp.add_argument("--no-risk", action="store_true",
+                    help="skip the batch-risk section (much faster)")
     rp.set_defaults(func=cmd_report)
 
     rk = sub.add_parser("risk", parents=[shared], help="train/evaluate the exception-risk model")

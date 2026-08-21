@@ -147,6 +147,71 @@ def taper_chart(rows: list[Any], width: int = 760, height: int = 300) -> str:
     return "".join(parts)
 
 
+def reliability_chart(bins: list[tuple[float, float, float, int]],
+                      width: int = 420, height: int = 300) -> str:
+    """Predicted probability against observed rate, with the ideal diagonal.
+
+    The diagonal is the whole point: a calibrated model's points sit on it. Any
+    point above means over-confidence, and an auto-clear threshold set there
+    would clear more than it should.
+    """
+    if not bins:
+        return "<p class='muted'>Not enough findings to assess calibration.</p>"
+
+    pad = 44
+    w = width - pad * 2
+    h = height - pad * 2
+
+    def px(v: float) -> float:
+        return pad + w * v
+
+    def py(v: float) -> float:
+        return pad + h - h * v
+
+    parts = [
+        f'<svg viewBox="0 0 {width} {height}" width="100%" '
+        f'role="img" aria-label="Reliability curve: predicted vs observed" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+    ]
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        parts.append(
+            f'<line x1="{pad}" y1="{py(frac):.1f}" x2="{pad + w}" y2="{py(frac):.1f}" '
+            f'stroke="{LINE}" stroke-width="1"/>'
+        )
+        parts.append(
+            f'<text x="{pad - 8}" y="{py(frac) + 4:.1f}" text-anchor="end" '
+            f'font-size="10" fill="{MUTED}">{frac:.1f}</text>'
+        )
+        parts.append(
+            f'<text x="{px(frac):.1f}" y="{pad + h + 18:.1f}" text-anchor="middle" '
+            f'font-size="10" fill="{MUTED}">{frac:.1f}</text>'
+        )
+
+    parts.append(
+        f'<line x1="{px(0):.1f}" y1="{py(0):.1f}" x2="{px(1):.1f}" y2="{py(1):.1f}" '
+        f'stroke="{MUTED}" stroke-width="1.5" stroke-dasharray="4 4"/>'
+    )
+    pts = " ".join(f"{px(p):.1f},{py(o):.1f}" for _, p, o, _ in bins)
+    parts.append(
+        f'<polyline points="{pts}" fill="none" stroke="{ACCENT}" stroke-width="2.5" '
+        f'stroke-linejoin="round"/>'
+    )
+    for _, p, o, n in bins:
+        r = 3 + min(n / 25, 5)
+        parts.append(f'<circle cx="{px(p):.1f}" cy="{py(o):.1f}" r="{r:.1f}" fill="{ACCENT}"/>')
+
+    parts.append(
+        f'<text x="{pad + w / 2:.0f}" y="{height - 6}" text-anchor="middle" '
+        f'font-size="11" fill="{MUTED}">predicted probability</text>'
+    )
+    parts.append(
+        f'<text x="12" y="{pad + h / 2:.0f}" text-anchor="middle" font-size="11" '
+        f'fill="{MUTED}" transform="rotate(-90 12 {pad + h / 2:.0f})">observed rate</text>'
+    )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def layer_bar(result: ReconResult) -> str:
     """Where the work happened. One stacked bar, deterministic tiers first."""
     counts = layer_breakdown(result)
@@ -231,6 +296,7 @@ def render(
     case,
     period: str,
     campaign_rows: list[Any] | None = None,
+    risk: dict[str, Any] | None = None,
 ) -> str:
     """Build the full close package as one self-contained HTML string."""
     is_mock = "mock" in card.client_name.lower()
@@ -294,6 +360,54 @@ def render(
                 f"<td>{r.recall:.3f}</td></tr>"
             )
         p.append("</tbody></table>")
+
+    # --- where the work will be -------------------------------------------
+    if risk:
+        p.append("<h2>Where the work will be — predicted before the close</h2>")
+        p.append(
+            f"<p>A calibrated model scores every batch for the probability it needs a "
+            f"human. Trained on separate periods and evaluated on data it never saw: "
+            f"<strong>Brier {risk['brier']:.4f}</strong> against a base-rate baseline of "
+            f"{risk['baseline']:.4f} (<span class='good'>skill "
+            f"{risk['skill']:+.3f}</span>), AUC {risk['auc']:.3f}.</p>"
+        )
+        if risk.get("budget"):
+            p.append(
+                "<table><thead><tr><th>Review the riskiest…</th>"
+                "<th>Escalations caught</th><th>Lift</th></tr></thead><tbody>"
+            )
+            for frac, caught, _n in risk["budget"][:4]:
+                lift = caught / frac if frac else 0
+                p.append(
+                    f"<tr><td>{frac:.0%} of batches</td><td>{caught:.0%}</td>"
+                    f"<td>{lift:.1f}&times;</td></tr>"
+                )
+            p.append("</tbody></table>")
+
+        if risk.get("top"):
+            p.append("<h3 class='sub' style='margin-top:26px'>Highest-risk batches this close</h3>")
+            p.append(
+                "<table><thead><tr><th>Batch</th><th>P(needs a human)</th>"
+                "<th>Actually escalated</th></tr></thead><tbody>"
+            )
+            for batch_id, prob, actual in risk["top"][:10]:
+                mark = ("<span class='bad'>yes</span>" if actual
+                        else "<span class='muted'>no</span>")
+                p.append(
+                    f"<tr><td class='mono'>{_esc(batch_id)}</td>"
+                    f"<td>{prob:.2f}</td><td>{mark}</td></tr>"
+                )
+            p.append("</tbody></table>")
+
+        if risk.get("reliability"):
+            p.append("<h3 class='sub' style='margin-top:26px'>Reliability — is the model honest?</h3>")
+            p.append(f"<div class='chart'>{reliability_chart(risk['reliability'])}</div>")
+            p.append(
+                "<p class='muted'>Points on the dashed diagonal mean a stated "
+                "probability matches the observed rate. Above the line is "
+                "over-confidence, and a threshold set there would clear more than "
+                "it should. Marker size is bucket population.</p>"
+            )
 
     # --- accuracy ---------------------------------------------------------
     p.append("<h2>Accuracy against ground truth</h2>")
