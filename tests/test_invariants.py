@@ -217,12 +217,13 @@ def test_campaign_learns_the_recurring_charges() -> None:
 def test_campaign_does_not_learn_one_off_anomalies() -> None:
     """One-off adjustments must never become standing rules - that is overfitting.
 
-    There are exactly three learnable patterns in the generated world: the AXIS
-    and SBI recurring charges, and the KOTAK reference label. Anything beyond
-    those means the store generalised a random anomaly, so the ceiling is part
-    of the assertion rather than a loose sanity bound.
+    There are exactly four learnable patterns in the generated world: the AXIS
+    and SBI recurring charges, the KOTAK reference label, and the international
+    card rate. Anything beyond those means the store generalised a random
+    anomaly, so the ceiling is part of the assertion rather than a loose bound.
     """
     from taper.campaign import run_campaign
+    from taper.generator import METHOD_RATES
 
     run = run_campaign(months=5)
     recurring_amounts = {"250.00", "500.00"}
@@ -238,10 +239,20 @@ def test_campaign_does_not_learn_one_off_anomalies() -> None:
         elif rule.kind == "narration_alias":
             assert rule.params.get("prefix") == "UTR"
             assert rule.params.get("marker"), "alias rule with no marker"
+        elif rule.kind == "fee_variant":
+            method = rule.params.get("method")
+            # The contracted rate, not whatever the gateway happened to bill.
+            # Ratifying the observed rate would let a systematic overcharge
+            # write itself into the rule store as policy.
+            assert str(METHOD_RATES.get(method)) == rule.params.get("rate"), (
+                f"{rule.rule_id} adopted a rate that is not the contracted one"
+            )
+        elif rule.kind == "bank_timing":
+            assert rule.params.get("offset_days", 0) > 0
         else:
             raise AssertionError(f"unexpected rule kind learned: {rule.kind}")
 
-    assert len(run.store) <= 3, "learned more rules than there are recurring patterns"
+    assert len(run.store) <= 4, "learned more rules than there are recurring patterns"
 
 
 def test_learning_reduces_load() -> None:
@@ -401,8 +412,19 @@ def test_risk_model_beats_quoting_the_base_rate() -> None:
     from taper.ml.train import train_and_evaluate
 
     _, report = train_and_evaluate(n_batches=20)
-    assert report.skill > 0.15, f"Brier skill only {report.skill:.3f}"
-    assert report.auc > 0.70, f"AUC only {report.auc:.3f}"
+
+    # AUC is asserted strictly because ranking is what survives a shift in the
+    # escalation base rate between periods. Skill is asserted loosely for the
+    # same reason: it measures calibration, which degrades under prior shift
+    # even when the ordering is perfect. An earlier, narrower seed split drove
+    # skill to -0.217 while AUC held at 0.800 - the model ranked correctly and
+    # was calibrated to the wrong world.
+    assert report.auc > 0.75, f"AUC only {report.auc:.3f} - ranking has broken"
+    assert report.skill > 0.15, (
+        f"Brier skill only {report.skill:.3f}. If AUC is healthy, suspect a "
+        f"base-rate difference between TRAIN_SEEDS and HOLDOUT_SEEDS rather "
+        f"than the model"
+    )
 
 
 def test_shipped_model_needs_no_third_party_package() -> None:
@@ -620,3 +642,91 @@ def test_report_defines_both_themes_and_a_print_override() -> None:
     assert html.count("var(--") > 30
     # Tables scroll inside their own box; the page body never scrolls sideways.
     assert html.count('class="tablewrap"') >= 1
+
+
+# ---------------------------------------------------------------------------
+# Claim: "a rate card we lack is a question, not an accusation"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_rate_card_is_asked_about_not_flagged(seed: int) -> None:
+    """International cards cost more. That is pricing, not theft.
+
+    Every one of them billed above the base rate must produce a single question
+    about the rate card - never a pile of overcharge findings. Flagging a
+    contracted price monthly is how a controller learns to ignore the report.
+    """
+    from taper.engine.matching import check_fees
+
+    case = generate(n_batches=40, seed=seed)
+    findings, exceptions = check_fees(case.bundle)
+
+    rate_cards = [e for e in exceptions if e.kind == "unknown_rate_card"]
+    assert len(rate_cards) == 1, f"expected one rate-card question, got {len(rate_cards)}"
+    assert rate_cards[0].context["method"] == "intl_card"
+
+    truth = {(d.defect_class, d.subject_id) for d in case.defects}
+    assert all(f.key() in truth for f in findings), (
+        "a contracted rate was reported as an overcharge"
+    )
+
+
+def test_learned_rate_card_silences_the_question() -> None:
+    """Once the contracted rate is known, the same month stops asking."""
+    from datetime import date
+
+    from taper.engine.matching import check_fees
+    from taper.engine.rules import Rule, RuleStore
+
+    case = generate(n_batches=40, seed=99)
+    store = RuleStore()
+    store.rules.append(
+        Rule("fee_variant_001", "fee_variant", {"method": "intl_card", "rate": "0.03"},
+             "ratecard::intl_card", str(date(2026, 1, 1)))
+    )
+    findings, exceptions = check_fees(case.bundle, store)
+
+    assert not [e for e in exceptions if e.kind == "unknown_rate_card"]
+    truth = {(d.defect_class, d.subject_id) for d in case.defects}
+    assert all(f.key() in truth for f in findings), "learned rate produced false flags"
+
+
+def test_learned_rate_card_still_catches_overcharges_on_that_method() -> None:
+    """Learning a higher contracted rate must not become a blanket amnesty.
+
+    Constructed rather than drawn from a seed: whether any given period happens
+    to contain an international-card overcharge is luck, and a capability test
+    that depends on luck is not a test.
+    """
+    from datetime import date
+
+    from taper.engine.matching import check_fees
+    from taper.engine.rules import Rule, RuleStore
+    from taper.models import SettlementRow, SourceBundle, TxnType
+
+    def intl_row(txn_id: str, rate: str) -> SettlementRow:
+        gross = Money("10000.00")
+        fee = (gross * Decimal(rate)).quantize(Money("0.01"))
+        return SettlementRow(
+            txn_id=txn_id, settlement_batch_id="b1", utr="UTR123456",
+            txn_type=TxnType.PAYMENT, gross_amount=gross, fee=fee,
+            gst_on_fee=(fee * Decimal("0.18")).quantize(Money("0.01")),
+            settled_on=date(2026, 6, 1), order_id=txn_id, method="intl_card",
+        )
+
+    # Four rows at the contracted 3%, one billed at 3.5%.
+    rows = [intl_row(f"pay_{i}", "0.03") for i in range(4)]
+    rows.append(intl_row("pay_bad", "0.035"))
+    bundle = SourceBundle(settlement=rows)
+
+    store = RuleStore()
+    store.rules.append(
+        Rule("fee_variant_001", "fee_variant", {"method": "intl_card", "rate": "0.03"},
+             "ratecard::intl_card", str(date(2026, 1, 1)))
+    )
+
+    findings, exceptions = check_fees(bundle, store)
+    assert not exceptions, "contracted rate is known; nothing left to ask"
+    assert [f.subject_id for f in findings] == ["pay_bad"], (
+        "the one row above the contracted rate must still be flagged"
+    )
