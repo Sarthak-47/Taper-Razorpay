@@ -192,12 +192,27 @@ def batch_nets(bundle: SourceBundle) -> dict[str, Money]:
     return dict(nets)
 
 
-def extract_utr(credit: BankCredit) -> str | None:
-    """Structured field first, then a strict narration regex. No guessing."""
+def extract_utr(credit: BankCredit, store=None) -> str | None:
+    """Structured field, then a strict regex, then a learned alias. No guessing.
+
+    The strict regex stays strict. Rather than loosening it to cover banks that
+    label the reference differently - which would produce confident wrong joins
+    everywhere else - an alias learned from one human decision handles that bank
+    specifically. Precision is preserved by narrowing the rule, not the pattern.
+    """
     if credit.utr:
         return credit.utr
     hit = UTR_PATTERN.search(credit.narration.upper())
-    return hit.group(0) if hit else None
+    if hit:
+        return hit.group(0)
+
+    if store is not None and len(store):
+        resolved = store.resolve({"narration": credit.narration})
+        if resolved:
+            rule, verdict = resolved
+            if rule.kind == "narration_alias" and verdict.get("utr"):
+                return verdict["utr"]
+    return None
 
 
 def learned_adjustment(credit: BankCredit, store) -> tuple[Money, str] | None:
@@ -275,7 +290,7 @@ def match_batches(
 
         # --- 1. UTR join ---------------------------------------------------
         if utr:
-            hits = [c for c in unclaimed if extract_utr(c) == utr]
+            hits = [c for c in unclaimed if extract_utr(c, store) == utr]
             if hits:
                 credited = sum((c.credit_amount for c in hits), Money("0.00"))
                 for c in hits:
@@ -334,9 +349,16 @@ def match_batches(
             )
 
         # --- 2. exact amount inside the settlement window -------------------
+        # A learned timing rule extends the window for banks known to settle
+        # slowly. Note the honest limitation: which bank paid a batch is only
+        # known *after* it is matched, so the extension cannot be applied
+        # per-bank here - it takes the widest learned offset, hard-capped. That
+        # is why the cap matters: an unbounded window turns amount matching into
+        # guesswork and the subset search into a combinatorial problem.
+        lag = MAX_SETTLEMENT_LAG + timedelta(days=_learned_extra_lag(batch_id, store))
         window = [
             c for c in unclaimed
-            if settled_on <= c.value_date <= settled_on + MAX_SETTLEMENT_LAG
+            if settled_on <= c.value_date <= settled_on + lag
         ]
         exact = [c for c in window if abs(c.credit_amount - expected) <= AMOUNT_TOLERANCE]
         if len(exact) == 1:
@@ -399,17 +421,32 @@ def match_batches(
         if matched_by_rule:
             continue
 
-        # --- 3. bounded subset netting (split settlements) ------------------
-        subset = _find_subset(window, expected)
+        # --- 3. bounded subset netting, optionally net of a learned charge ---
+        # A batch can be split across credits *and* short by a recurring charge
+        # at the same time. Searching only for the full expected total misses
+        # every such batch, which was the single largest source of exceptions.
+        # Each candidate target is an exact sum we can defend, not a tolerance
+        # widened until something fits.
+        subset, applied_adj = None, None
+        for target, adj in _candidate_targets(window, expected, store):
+            subset = _find_subset(window, target)
+            if subset:
+                applied_adj = adj
+                break
+
         if subset:
             credited = sum((c.credit_amount for c in subset), Money("0.00"))
             for c in subset:
                 unclaimed.remove(c)
+            effective = expected - (applied_adj[0] if applied_adj else Money("0.00"))
             matches.append(
                 BatchMatch(
                     batch_id=batch_id, bank_txn_ids=[c.bank_txn_id for c in subset],
-                    expected_net=expected, credited=credited,
-                    layer=Layer.L1_FUZZY, confidence=0.90, method="subset_netting",
+                    expected_net=effective, credited=credited,
+                    layer=Layer.L2_RULE if applied_adj else Layer.L1_FUZZY,
+                    confidence=0.90,
+                    method="subset_netting" if not applied_adj
+                    else f"subset_netting+learned_charge:{applied_adj[1]}",
                 )
             )
             findings.append(
@@ -425,7 +462,25 @@ def match_batches(
                     },
                 )
             )
-            findings.extend(_post_match_checks(batch_id, subset, expected, credited, settled_on))
+            if applied_adj:
+                findings.append(
+                    Finding(
+                        defect_class=DefectClass.UNRECORDED_ADJUSTMENT,
+                        subject_id=batch_id,
+                        layer=Layer.L2_RULE,
+                        confidence=0.95,
+                        money_impact=applied_adj[0],
+                        rule_id=applied_adj[1],
+                        evidence={
+                            "amount": str(applied_adj[0]),
+                            "explained_by": applied_adj[1],
+                            "status": "known recurring charge, batch also split",
+                        },
+                    )
+                )
+            findings.extend(
+                _post_match_checks(batch_id, subset, effective, credited, settled_on, store)
+            )
             continue
 
         # --- 4. give up honestly -------------------------------------------
@@ -461,6 +516,58 @@ def match_batches(
         )
 
     return matches, findings, exceptions
+
+
+def _learned_extra_lag(batch_id: str, store) -> int:
+    """Extra days of settlement window granted by a learned timing rule.
+
+    Capped hard. A timing rule is evidence about a bank's habits, not a licence
+    to search an unbounded date range - a wide window turns amount matching into
+    guesswork and the subset search into a combinatorial problem.
+    """
+    if store is None or not len(store):
+        return 0
+    best = 0
+    for rule in store.rules:
+        if rule.kind != "bank_timing":
+            continue
+        try:
+            offset = int(rule.params.get("offset_days", 0))
+        except (TypeError, ValueError):
+            continue
+        best = max(best, min(offset, 5))
+    return best
+
+
+def _has_any_reference(narration: str) -> bool:
+    """Does this narration contain something that could be a settlement reference?
+
+    A run of six or more digits. Used only to tell "unreadable label" apart from
+    "genuinely no reference", which are different problems with different fixes.
+    """
+    return re.search(r"\d{6,}", narration) is not None
+
+
+def _candidate_targets(
+    window: list[BankCredit], expected: Money, store
+) -> list[tuple[Money, tuple[Money, str] | None]]:
+    """Sums worth searching for: the full payout, then payout less each learned charge.
+
+    Kept to a handful of *exact* targets on purpose. The alternative - widening
+    the tolerance until something fits - would manufacture matches that reconcile
+    to nothing in particular, which is worse than an honest exception.
+    """
+    targets: list[tuple[Money, tuple[Money, str] | None]] = [(expected, None)]
+    seen: set[Money] = {expected}
+    for c in window:
+        hit = learned_adjustment(c, store)
+        if not hit:
+            continue
+        reduced = expected - hit[0]
+        if reduced not in seen:
+            seen.add(reduced)
+            targets.append((reduced, hit))
+    return targets
 
 
 def _find_subset(credits: list[BankCredit], target: Money) -> list[BankCredit] | None:
@@ -511,10 +618,15 @@ def _post_match_checks(
             )
         )
 
-    # Narration: matched, but the narration carried no usable reference. Worth
-    # reporting because it is what forced the fallback path.
+    # Narration: matched, but the narration carried no reference at all.
+    #
+    # "No reference we could parse" and "no reference present" are different
+    # conditions and only the second is a defect. A bank that labels the same
+    # reference as REF instead of UTR has not lost anything - we simply cannot
+    # read it yet, and one learned alias fixes that permanently. Reporting those
+    # as drift would flag a bank convention as a data problem every month.
     for c in credits:
-        if extract_utr(c) is None:
+        if extract_utr(c, store) is None and not _has_any_reference(c.narration):
             findings.append(
                 Finding(
                     defect_class=DefectClass.NARRATION_DRIFT,
