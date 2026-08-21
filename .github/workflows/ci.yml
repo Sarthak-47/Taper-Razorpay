@@ -60,6 +60,9 @@ jobs:
       - name: Smoke - rule lifecycle
         run: python -m taper.cli --mock drift --months 5 --batches 20
 
+      - name: Smoke - prompt-injection red team
+        run: python -m taper.cli --mock redteam --batches 20
+
   metrics:
     name: verify reported metrics
     runs-on: ubuntu-latest
