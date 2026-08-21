@@ -26,11 +26,16 @@ dependencies = []
 # offline mock must run with zero third-party dependencies, so CI and any
 # reviewer without an API key can still execute the full pipeline.
 llm = ["anthropic>=0.40.0"]
+# Optional. The exception-risk model falls back to a dependency-free
+# logistic regression when scikit-learn is absent, so nothing breaks
+# without it - the evaluation simply reports the weaker backend.
+ml = ["scikit-learn>=1.4"]
 dev = [
     "anthropic>=0.40.0",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "ruff>=0.6.0",
+    "scikit-learn>=1.4",
 ]
 
 [project.urls]
