@@ -215,15 +215,33 @@ def test_campaign_learns_the_recurring_charges() -> None:
 
 
 def test_campaign_does_not_learn_one_off_anomalies() -> None:
-    """One-off adjustments must never become standing rules - that is overfitting."""
+    """One-off adjustments must never become standing rules - that is overfitting.
+
+    There are exactly three learnable patterns in the generated world: the AXIS
+    and SBI recurring charges, and the KOTAK reference label. Anything beyond
+    those means the store generalised a random anomaly, so the ceiling is part
+    of the assertion rather than a loose sanity bound.
+    """
     from taper.campaign import run_campaign
 
     run = run_campaign(months=5)
+    recurring_amounts = {"250.00", "500.00"}
+
     for rule in run.store.rules:
-        assert rule.params.get("category") == "bank_recurring_charge", (
-            f"{rule.rule_id} generalised a non-recurring event"
-        )
-    assert len(run.store) <= 2, "learned more rules than there are recurring patterns"
+        if rule.kind == "adjustment_pattern":
+            assert rule.params.get("category") == "bank_recurring_charge", (
+                f"{rule.rule_id} generalised a non-recurring event"
+            )
+            assert rule.params.get("amount") in recurring_amounts, (
+                f"{rule.rule_id} learned a one-off amount {rule.params.get('amount')}"
+            )
+        elif rule.kind == "narration_alias":
+            assert rule.params.get("prefix") == "UTR"
+            assert rule.params.get("marker"), "alias rule with no marker"
+        else:
+            raise AssertionError(f"unexpected rule kind learned: {rule.kind}")
+
+    assert len(run.store) <= 3, "learned more rules than there are recurring patterns"
 
 
 def test_learning_reduces_load() -> None:
@@ -278,3 +296,49 @@ def test_report_escapes_untrusted_text() -> None:
     from taper.report import _esc
 
     assert _esc("<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "alias extraction is typed, not a model-authored pattern"
+# ---------------------------------------------------------------------------
+
+def test_alias_extraction_is_bounded_and_typed() -> None:
+    """The model names a marker and a prefix; fixed code does the extraction.
+
+    Guards against the store ever executing a model-authored regex against
+    every future narration - an injection surface for no benefit.
+    """
+    from taper.engine.rules import _alias_extract
+
+    p = {"marker": "REF", "prefix": "UTR"}
+    assert _alias_extract(p, "KKBK NEFT REF 70000123456 RAZORPAY") == "UTR70000123456"
+    assert _alias_extract(p, "KKBK NEFT REF: 70000123456 X") == "UTR70000123456"
+    # marker absent
+    assert _alias_extract(p, "NEFT 70000123456 RAZORPAY") is None
+    # too few digits to be a reference
+    assert _alias_extract(p, "NEFT REF 123 RAZORPAY") is None
+    # absurdly long run is a parse gone wrong, not a reference
+    assert _alias_extract(p, "REF " + "9" * 40) is None
+    # no marker configured
+    assert _alias_extract({"marker": "", "prefix": "UTR"}, "REF 70000123456") is None
+
+
+def test_alias_never_widens_the_strict_regex() -> None:
+    """Learning an alias for one bank must not change any other bank's parsing."""
+    from datetime import date
+
+    from taper.engine.matching import extract_utr
+    from taper.engine.rules import Rule, RuleStore
+    from taper.models import BankCredit, Money
+
+    store = RuleStore()
+    store.rules.append(Rule("narration_alias_001", "narration_alias",
+                            {"marker": "REF", "prefix": "UTR"}, "setl_x", "2026-01-01"))
+
+    clean = BankCredit("b1", Money("100.00"), date(2026, 1, 1),
+                       "NEFT-UTR70000123456-RAZORPAY")
+    assert extract_utr(clean, store) == "UTR70000123456"
+
+    none_at_all = BankCredit("b2", Money("100.00"), date(2026, 1, 1),
+                             "MERCHANT SETTLEMENT CREDIT")
+    assert extract_utr(none_at_all, store) is None
