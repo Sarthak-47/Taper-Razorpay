@@ -143,8 +143,16 @@ def generate(
     seed: int = 7,
     rates: DefectRates | None = None,
     start: date = date(2026, 6, 1),
+    batch_spacing_days: int = 2,
 ) -> GeneratedCase:
-    """Build one reconciliation period across all three sources."""
+    """Build one reconciliation period across all three sources.
+
+    ``batch_spacing_days`` is the stress knob. Batches settle this many days
+    apart, so shrinking it packs more batches into every settlement window and
+    forces the matcher to choose between many similar candidate credits. At
+    spacing 0 every batch in a period competes for the same window, which is
+    the adversarial case ``taper stress`` walks toward.
+    """
     rng = random.Random(seed)
     rates = rates or DefectRates()
 
@@ -160,7 +168,7 @@ def generate(
     for b in range(n_batches):
         batch_id = f"setl_{seed}_{b:03d}"
         utr = f"UTR{seed}{b:04d}{rng.randint(1000, 9999)}"
-        settled_on = start + timedelta(days=b * 2)
+        settled_on = start + timedelta(days=b * batch_spacing_days)
         profile = rng.choice(BANK_PROFILES)
         bank_name = profile.name
         rows: list[SettlementRow] = []
