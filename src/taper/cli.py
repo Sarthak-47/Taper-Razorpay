@@ -354,6 +354,35 @@ def cmd_risk(args) -> None:
     print(BAR)
 
 
+def cmd_stress(args) -> None:
+    """Push the matcher until it breaks and report which way it failed."""
+    from .adversarial import run_stress
+
+    report = run_stress(n_batches=args.batches)
+
+    print(BAR)
+    print("  FAILURE BOUNDARY - where does it break, and which way?")
+    print(BAR)
+    print(f"  {'level':<11}{'ambiguity':>10}{'spacing':>9}{'precision':>11}"
+          f"{'recall':>9}{'match':>9}{'exceptions':>12}{'false':>7}")
+    for r in report.results:
+        flag = "  <-- BROKE" if r.false_positives else ""
+        print(f"  {r.level.name:<11}{r.level.ambiguity:>9.1f}x{r.level.spacing:>9}"
+              f"{r.precision:>11.3f}{r.recall:>9.3f}{r.match_rate:>9.1%}"
+              f"{r.exceptions:>12.1f}{r.false_positives:>7}{flag}")
+
+    print(f"\n  averaged over {report.results[0].seeds} seeds per level")
+    print(f"\n  VERDICT\n  {report.verdict()}")
+    print(f"\n  {'-' * 68}")
+    print("  Ambiguity scales the defect rates that strip identifying references,")
+    print("  so more batches fall past the UTR join onto amount-and-date matching.")
+    print("  Spacing packs batches closer together, so those fallback matches face")
+    print("  more competing candidates in the same window. Both attack the")
+    print("  fallback path specifically rather than adding noise the engine")
+    print("  already handles.")
+    print(BAR)
+
+
 def _global_flags() -> argparse.ArgumentParser:
     """Flags accepted on either side of the subcommand.
 
@@ -415,6 +444,10 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    st = sub.add_parser("stress", parents=[shared],
+                        help="find the failure boundary and its direction")
+    st.set_defaults(func=cmd_stress)
 
     e = sub.add_parser("evaluate", parents=[shared], help="tuning set vs held-out set")
     e.add_argument("--tune-seed", type=int, default=7)

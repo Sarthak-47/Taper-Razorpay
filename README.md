@@ -219,6 +219,49 @@ over half the model's weight. This is a model that learned two strong signals
 plus some texture, not a deep insight — and the feature importances print with
 every run so nobody has to take that on trust.
 
+### Failure boundary — where it breaks, and which way
+
+Stating your own limits precisely is stronger than claiming you have none. The
+stress harness walks the engine through escalating conditions and finds the
+point where it stops working — then reports **which way it failed**, which
+matters more than when:
+
+- **fail-safe** — it stops asserting and starts escalating. Match rate falls,
+  exceptions rise, precision holds. The close takes longer, a human does more,
+  and no wrong number is ever signed off.
+- **fail-wrong** — it keeps asserting into ambiguity. Match rate looks fine and
+  the findings are quietly incorrect.
+
+The design rule in `matching.py` — *assert only when unambiguous* — is a bet
+that the engine fails the first way. This is the test of that bet:
+
+| Level | Ambiguity | Spacing | Precision | Recall | Match | Exceptions | False findings |
+|---|---|---|---|---|---|---|---|
+| baseline | 1.0× | 2 | **1.000** | 0.898 | 65.6% | 12 | **0** |
+| mild | 1.5× | 2 | **1.000** | 0.851 | 63.9% | 19 | **0** |
+| moderate | 2.5× | 1 | **1.000** | 0.730 | 69.2% | 38 | **0** |
+| heavy | 4.0× | 1 | **1.000** | 0.639 | 76.0% | 58 | **0** |
+| severe | 6.0× | 0 | **1.000** | 0.409 | 66.7% | 113 | **0** |
+| absurd | 6.6× | 0 | **1.000** | 0.411 | **0.0%** | 120 | **0** |
+
+**Fail-safe across the entire ladder.** Precision never leaves 1.000 — zero
+false findings at any level. At the top rung the engine matches *nothing* and
+escalates all 120 batches: it gives up rather than guesses.
+
+The two knobs attack the fallback path specifically rather than adding noise the
+engine already handles. `ambiguity` scales the defect rates that strip
+identifying references, so more batches fall past the UTR join onto
+amount-and-date matching. `spacing` packs batches closer together so those
+fallback matches face more competing candidates in one window.
+
+That second knob is there because of a false start: batch spacing *alone*
+changed nothing at all, since UTR-joined batches never consult the settlement
+window. A test now guards against either knob quietly becoming a no-op.
+
+```bash
+python -m taper.cli stress
+```
+
 ### Three bugs the harness caught, and what they cost
 
 All three were found by measurement, not by reading the code:
@@ -343,6 +386,7 @@ src/taper/
   generator.py         synthetic 3-source data + labelled defect injection
                        incl. persistent BankProfiles - the structure worth learning
   campaign.py          consecutive closes, HumanOracle, the rule-growth curve
+  adversarial.py       stress ladder; proves it fails safe rather than wrong
   engine/
     results.py         Finding / BatchMatch / Exception_, with layer attribution
     matching.py        L0 + L1, the deterministic core

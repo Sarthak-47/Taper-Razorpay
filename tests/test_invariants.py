@@ -467,3 +467,42 @@ def test_global_flags_work_on_either_side_of_the_subcommand() -> None:
     assert p.parse_args(["risk", "--mock"]).mock is True
     assert p.parse_args(["--mock", "risk"]).mock is True
     assert p.parse_args(["risk"]).mock is False
+
+
+# ---------------------------------------------------------------------------
+# Claim: "under stress it fails safe, not wrong"
+# ---------------------------------------------------------------------------
+
+def test_engine_fails_safe_not_wrong_under_stress() -> None:
+    """The central safety claim, and the one worth guarding hardest.
+
+    Under escalating ambiguity the engine must stop asserting and start
+    escalating - never keep asserting into conditions it cannot resolve. A
+    single false finding at any rung means a wrong number could be signed off,
+    which is the one failure a payments close cannot absorb.
+    """
+    from taper.adversarial import run_stress
+
+    report = run_stress(seeds=[301, 302], n_batches=20)
+    broke = report.broke_at
+    if broke is not None:
+        raise AssertionError(
+            f"engine asserted {broke.false_positives} false finding(s) at stress "
+            f"level '{broke.level.name}' (ambiguity {broke.level.ambiguity}x, "
+            f"spacing {broke.level.spacing}) - it failed wrong, not safe"
+        )
+    assert report.precision_floor == 1.0
+
+
+def test_stress_actually_stresses() -> None:
+    """A ladder that does not degrade anything is not testing a boundary.
+
+    Guards against the knobs quietly becoming no-ops - as batch spacing alone
+    once was, because UTR-joined batches never consult the settlement window.
+    """
+    from taper.adversarial import run_stress
+
+    report = run_stress(seeds=[301, 302], n_batches=20)
+    first, last = report.results[0], report.results[-1]
+    assert last.recall < first.recall - 0.2, "top of the ladder barely hurt recall"
+    assert last.exceptions > first.exceptions * 2, "escalations did not rise"
