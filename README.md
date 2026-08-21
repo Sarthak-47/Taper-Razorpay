@@ -268,6 +268,30 @@ not evidence about frontier models — those numbers need an API key and have no
 been run. Every artifact records which resolver produced it, so the two can
 never be confused.
 
+#### The taper reproduces on a real model
+
+The headline curve above is averaged over eight mock-backed campaigns for
+statistical stability. It also runs end to end against a **real local model** —
+six consecutive closes, in 84 seconds, at zero cost:
+
+```bash
+python -m taper.cli --llm ollama --llm-model qwen2.5:7b campaign --months 6 --average-runs 1
+```
+
+| Month | Rules | Calls/100 | Exceptions | Match rate | Precision | Recall |
+|---|---|---|---|---|---|---|
+| 1 | 3 | 0.79 | 11 | 74.3% | 1.000 | 0.934 |
+| 2 | 3 | **0.31** | **4** | 94.7% | 1.000 | 0.959 |
+| 3 | 3 | 0.31 | 4 | 94.7% | 1.000 | 0.946 |
+| 4 | 4 | 0.55 | 8 | 94.6% | 1.000 | 0.932 |
+| 5 | 4 | 0.44 | 6 | 91.9% | 1.000 | 0.945 |
+| 6 | 4 | 0.58 | 8 | 94.4% | 1.000 | 0.934 |
+
+All four rule types learned, precision **1.000 in every month**, match rate
+74.3% → 94.4%. So the learning loop is not an artifact of the offline heuristic:
+it holds with a real model in the loop, on hardware anyone reviewing this
+already has.
+
 ### Red team — prompt injection through a bank narration
 
 A merchant's own customer can put text into a payment reference. It travels
@@ -669,6 +693,11 @@ All four layers are wired, and three of the four rule types learn end to end
 batch both split across credits *and* short by a recurring charge — now resolve
 deterministically via candidate-target subset netting.
 
-Remaining work: real-model evaluation runs — everything to date is either
-deterministic or against the offline mock — and `fee_variant` rule learning,
-the one rule type still unproposed.
+Layer 3 has been validated against a **real model** — a local qwen2.5 via
+Ollama — for a single close, the ablation, and a full six-month campaign. The
+offline mock is now only a CI stand-in, and every artifact records which
+resolver produced it.
+
+Remaining work: the same runs against a **frontier** model. The local result
+says a 14B model adds nothing measurable on this workload; that is not evidence
+about what a stronger one would do, and the README does not claim otherwise.
