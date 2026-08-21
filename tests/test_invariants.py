@@ -1221,3 +1221,27 @@ def test_campaign_precision_never_slips() -> None:
     rows = run_campaign_averaged(runs=4, months=5, n_batches=20)
     worst = min(r.precision for r in rows)
     assert worst == 1.0, f"precision dipped to {worst:.4f} in a campaign month"
+
+
+def test_relearned_rule_keeps_its_own_banks_keyword() -> None:
+    """A repricing must relearn the *same* bank, not whichever charge came first.
+
+    Two recurring charges exist - AXIS "PROC CHG" and SBI "SVC CHG". The
+    replacement keyword used to be reconstructed by scanning for the first
+    recurring defect in the period, which returns SVC CHG regardless of which
+    rule went stale. Retiring the AXIS rule would then relearn it under SBI's
+    label: a rule pointing at the wrong bank, with a plausible-looking amount.
+    """
+    from taper.campaign import run_campaign
+
+    run = run_campaign(months=6, reprice=(4, "AXIS", Money("375.00")))
+
+    retired = {r.params.get("keyword"): r.params.get("amount") for r, _ in run.store.retired}
+    assert retired, "nothing retired despite a repricing"
+    assert "PROC CHG" in retired, f"retired the wrong rule: {retired}"
+
+    live = {r.params.get("keyword"): r.params.get("amount")
+            for r in run.store.rules if r.kind == "adjustment_pattern"}
+    assert live.get("PROC CHG") == "375.00", f"AXIS not relearned correctly: {live}"
+    # SBI never repriced, so its rule must be untouched at its original amount.
+    assert live.get("SVC CHG") == "500.00", f"SBI's rule was disturbed: {live}"

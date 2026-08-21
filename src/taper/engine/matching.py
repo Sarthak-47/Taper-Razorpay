@@ -555,7 +555,7 @@ def match_batches(
         # per-bank here - it takes the widest learned offset, hard-capped. That
         # is why the cap matters: an unbounded window turns amount matching into
         # guesswork and the subset search into a combinatorial problem.
-        lag = MAX_SETTLEMENT_LAG + timedelta(days=_learned_extra_lag(batch_id, store))
+        lag = MAX_SETTLEMENT_LAG + timedelta(days=_learned_extra_lag(store))
         window = [
             c
             for offset in range(lag.days + 1)
@@ -720,7 +720,7 @@ def match_batches(
     return matches, findings, exceptions
 
 
-def _learned_extra_lag(batch_id: str, store) -> int:
+def _learned_extra_lag(store) -> int:
     """Extra days of settlement window granted by a learned timing rule.
 
     Capped hard. A timing rule is evidence about a bank's habits, not a licence
@@ -930,6 +930,11 @@ def check_rule_health(
                     "stored_amount": str(stored),
                     "observed_amount": str(modal_amount),
                     "occurrences": modal_n,
+                    # The retiring rule's own keyword travels with the exception.
+                    # Without it the replacement has to be reconstructed by
+                    # guesswork downstream, and with two recurring charges in
+                    # play that guess picks the wrong bank's label.
+                    "keyword": str(rule.params.get("keyword", "")) if rule else "",
                 },
                 reason=(
                     f"Rule {rule_id} still matches these narrations but no longer "

@@ -109,20 +109,13 @@ class HumanOracle:
             "proposed_rule": {
                 "kind": "adjustment_pattern",
                 "params": {
-                    "keyword": self._keyword_for(exc.context.get("rule_id")),
+                    "keyword": str(exc.context.get("keyword", "")),
                     "category": "bank_recurring_charge",
                     "amount": str(observed),
                 },
                 "confidence": 0.95,
             },
         }
-
-    def _keyword_for(self, rule_id: Any) -> str:
-        """Recover the narration keyword the retiring rule was matching on."""
-        for defect in self.case.defects:
-            if defect.detail.get("recurring") and defect.detail.get("keyword"):
-                return str(defect.detail["keyword"])
-        return ""
 
     def _confirm_rate_card(self, exc: Exception_) -> dict[str, Any] | None:
         """Answer "what is this method actually contracted at?" from the rate card.
