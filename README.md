@@ -171,9 +171,20 @@ drops below 1.000 precision.
 
 ## Running it
 
+Everything installs into a project-local virtualenv — nothing touches the global
+Python.
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
 ```
+
+```bash
+.venv/Scripts/python.exe -m pip install -e ".[dev]"
+```
+
+On macOS or Linux use `.venv/bin/python` instead. The deterministic layers and the
+offline mock have **no third-party dependencies** — `pip install -e .` alone is
+enough to run everything except layer 3 against a real model.
 
 Deterministic only — no API key needed, and the honest baseline:
 
@@ -184,7 +195,7 @@ python -m taper.cli --no-llm reconcile --seed 99
 Full stack against a real model:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...
+cp .env.example .env   # then add your key
 python -m taper.cli reconcile --seed 99
 ```
 
@@ -235,7 +246,7 @@ Nine injected defect classes: `duplicate_capture`, `cross_cycle_refund`,
 ## Layout
 
 ```
-taper/
+src/taper/
   models.py            domain types; Decimal money, never float
   generator.py         synthetic 3-source data + labelled defect injection
                        incl. persistent BankProfiles - the structure worth learning
@@ -249,6 +260,7 @@ taper/
   metrics/harness.py   per-class scoring, calibration, ablation, FP cost
   cli.py               reconcile / ablate / evaluate
 tests/                 invariants that guard the claims above
+.github/workflows/     lint, test on 3.11-3.13, CLI smoke runs, metrics re-assertion
 ```
 
 ## The human in the loop
