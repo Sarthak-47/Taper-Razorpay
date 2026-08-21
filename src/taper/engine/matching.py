@@ -54,6 +54,11 @@ SYSTEMATIC_RATE_MIN_ROWS = 3
 # what nearly everything on a method is billed at; an overcharge is a minority.
 SYSTEMATIC_RATE_MIN_SHARE = 0.5
 
+# How many payouts must disagree with a stored charge before we call the rule
+# stale rather than the payout odd. One mismatch proves nothing; a repeated one
+# is the world having moved.
+STALE_RULE_MIN_ROWS = 2
+
 
 # ---------------------------------------------------------------------------
 # Layer 0 - transaction-level arithmetic
@@ -773,6 +778,75 @@ def _post_match_checks(
     return findings
 
 
+def check_rule_health(
+    matches: list[BatchMatch], bundle: SourceBundle, store
+) -> list[Exception_]:
+    """Notice when something we learned has stopped being true.
+
+    Learning is only half a lifecycle. Until now the store could add rules and
+    never question them, so when a bank changed its processing charge the rule
+    kept asserting the old amount, quietly failed to explain the gap, and the
+    batch became an ordinary exception. The engine degraded safely but said
+    nothing about *why* - and a human re-investigating a solved problem every
+    month is exactly the waste the rule store exists to remove.
+
+    The signal is specific: a charge rule whose narration still matches, on a
+    batch that still has a shortfall, where that shortfall is a consistent
+    amount that is *not* the one the rule stores. Consistency is what separates
+    "the bank repriced" from "one odd payout" - a single mismatch proves
+    nothing and is left alone.
+    """
+    if store is None or not len(store):
+        return []
+
+    credit_by_id = {c.bank_txn_id: c for c in bundle.bank}
+    observed: dict[str, list[Money]] = defaultdict(list)
+
+    for m in matches:
+        shortfall = m.expected_net - m.credited
+        if shortfall <= AMOUNT_TOLERANCE:
+            continue
+        for bank_id in m.bank_txn_ids:
+            credit = credit_by_id.get(bank_id)
+            if not credit:
+                continue
+            hit = learned_adjustment(credit, store)
+            if hit and abs(hit[0] - shortfall) > AMOUNT_TOLERANCE:
+                observed[hit[1]].append(shortfall)
+            break
+
+    exceptions: list[Exception_] = []
+    for rule_id, amounts in sorted(observed.items()):
+        if len(amounts) < STALE_RULE_MIN_ROWS:
+            continue
+        counts = Counter(amounts)
+        modal_amount, modal_n = counts.most_common(1)[0]
+        if modal_n < STALE_RULE_MIN_ROWS:
+            continue
+        rule = next((r for r in store.rules if r.rule_id == rule_id), None)
+        stored = rule.params.get("amount") if rule else "?"
+        exceptions.append(
+            Exception_(
+                subject_id=f"stale::{rule_id}",
+                kind="stale_rule",
+                context={
+                    "rule_id": rule_id,
+                    "stored_amount": str(stored),
+                    "observed_amount": str(modal_amount),
+                    "occurrences": modal_n,
+                },
+                reason=(
+                    f"Rule {rule_id} still matches these narrations but no longer "
+                    f"explains them: it stores {stored} while {modal_n} payouts are "
+                    f"short by {modal_amount}. The underlying charge appears to have "
+                    f"changed - confirm and update the rule rather than resolving "
+                    f"each payout again."
+                ),
+            )
+        )
+    return exceptions
+
+
 def run_deterministic(
     bundle: SourceBundle,
     store=None,
@@ -796,4 +870,8 @@ def run_deterministic(
 
     matches, match_findings, exceptions = match_batches(bundle, store)
     findings += match_findings
-    return matches, findings, fee_exceptions + exceptions
+
+    # Ask whether anything we learned has stopped being true. Runs last because
+    # it reads the matches the earlier layers produced.
+    stale = check_rule_health(matches, bundle, store)
+    return matches, findings, fee_exceptions + stale + exceptions

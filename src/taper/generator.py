@@ -167,6 +167,7 @@ def generate(
     rates: DefectRates | None = None,
     start: date = date(2026, 6, 1),
     batch_spacing_days: int = 2,
+    charge_overrides: dict[str, Money] | None = None,
 ) -> GeneratedCase:
     """Build one reconciliation period across all three sources.
 
@@ -178,6 +179,9 @@ def generate(
     """
     rng = random.Random(seed)
     rates = rates or DefectRates()
+    # Banks reprice. When they do, a rule learned last month becomes a
+    # confident wrong answer, which is what `check_rule_health` exists to catch.
+    overrides = charge_overrides or {}
 
     ledger: list[LedgerEntry] = []
     settlement: list[SettlementRow] = []
@@ -328,13 +332,14 @@ def generate(
         #                Learnable once, then free forever.
         #   one-off    - a genuine anomaly. Never learnable, always a human's
         #                problem. A system that "learns" these is overfitting.
-        if profile.adjustment_amount is not None:
-            expected_credit -= profile.adjustment_amount
+        charge = overrides.get(profile.name, profile.adjustment_amount)
+        if charge is not None:
+            expected_credit -= charge
             defects.append(
                 InjectedDefect(
                     DefectClass.UNRECORDED_ADJUSTMENT, batch_id,
                     {
-                        "amount": str(profile.adjustment_amount),
+                        "amount": str(charge),
                         "bank": bank_name,
                         "recurring": True,
                         "keyword": profile.adjustment_keyword,

@@ -53,6 +53,10 @@ class HumanOracle:
         if alias:
             return alias
 
+        stale = self._confirm_repricing(exc)
+        if stale:
+            return stale
+
         rate_card = self._confirm_rate_card(exc)
         if rate_card:
             return rate_card
@@ -85,6 +89,40 @@ class HumanOracle:
                 },
             }
         return {"defect_class": truths[0].defect_class.value, "proposed_rule": None}
+
+    def _confirm_repricing(self, exc: Exception_) -> dict[str, Any] | None:
+        """Confirm that a bank really has repriced, and hand back the new amount.
+
+        The engine can see that a stored charge stopped explaining the payouts;
+        only a human can say whether the bank repriced or something else broke.
+        Answering closes the loop the rule store would otherwise leave open -
+        without this the same question returns every month forever.
+        """
+        if exc.kind != "stale_rule":
+            return None
+        observed = exc.context.get("observed_amount")
+        if not observed:
+            return None
+        return {
+            "defect_class": None,
+            "retire_rule": exc.context.get("rule_id"),
+            "proposed_rule": {
+                "kind": "adjustment_pattern",
+                "params": {
+                    "keyword": self._keyword_for(exc.context.get("rule_id")),
+                    "category": "bank_recurring_charge",
+                    "amount": str(observed),
+                },
+                "confidence": 0.95,
+            },
+        }
+
+    def _keyword_for(self, rule_id: Any) -> str:
+        """Recover the narration keyword the retiring rule was matching on."""
+        for defect in self.case.defects:
+            if defect.detail.get("recurring") and defect.detail.get("keyword"):
+                return str(defect.detail["keyword"])
+        return ""
 
     def _confirm_rate_card(self, exc: Exception_) -> dict[str, Any] | None:
         """Answer "what is this method actually contracted at?" from the rate card.
@@ -245,12 +283,19 @@ def run_campaign(
     config: RunConfig | None = None,
     client: LLMClient | None = None,
     learn: bool = True,
+    reprice: tuple[int, str, Money] | None = None,
 ) -> CampaignResult:
     """Close the books ``months`` times in a row, keeping what we learn.
 
     Each month is fresh data (a new seed) drawn from the *same* bank profiles -
     new transactions, same institutional behaviour. That is the realistic
     setting: the merchant's volume changes every month, their bank's habits do not.
+
+    ``reprice`` breaks that assumption on purpose: ``(month, bank, new_amount)``
+    changes a bank's recurring charge partway through, so a rule learned earlier
+    becomes a confident wrong answer. Without it the campaign only ever proves
+    that learning works, never that the system notices when what it learned has
+    stopped being true.
     """
     config = config or RunConfig(use_llm=True, use_real_llm=False)
     store = RuleStore()
@@ -259,7 +304,13 @@ def run_campaign(
     for m in range(months):
         seed = base_seed + m
         start = date(2026, 1, 1) + timedelta(days=31 * m)
-        case = generate(n_batches=n_batches, seed=seed, rates=DefectRates(), start=start)
+        overrides: dict[str, Money] = {}
+        if reprice and m + 1 >= reprice[0]:
+            overrides[reprice[1]] = reprice[2]
+        case = generate(
+            n_batches=n_batches, seed=seed, rates=DefectRates(), start=start,
+            charge_overrides=overrides,
+        )
 
         rules_before = len(store)
         rejected_before = len(store.rejected)
@@ -354,6 +405,13 @@ def _learn_from_reviews(
         resolution = oracle.resolve(exc)
         if not resolution:
             continue
+        # A repricing must retire the old rule first. Admitting the new amount
+        # alongside the old one would leave two rules disagreeing about the same
+        # narration, and whichever was appended first would keep winning.
+        doomed = resolution.get("retire_rule")
+        if doomed:
+            store.retire(str(doomed), f"superseded from {exc.subject_id}")
+
         proposal = resolution.get("proposed_rule")
         if not proposal:
             continue

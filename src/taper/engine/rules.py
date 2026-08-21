@@ -137,6 +137,9 @@ class RuleStore:
         self.path = path
         self.rules: list[Rule] = []
         self.rejected: list[AdmissionResult] = []
+        # Rules that were true and stopped being true, with why. Kept rather
+        # than deleted so a past close can still be explained.
+        self.retired: list[tuple[Rule, str]] = []
         if path and path.exists():
             self.load()
 
@@ -182,6 +185,20 @@ class RuleStore:
             rule=rule,
             reason=f"admitted: consistent with {applicable} confirmed case(s)",
         )
+
+    def retire(self, rule_id: str, reason: str) -> Rule | None:
+        """Remove a rule that has stopped being true, keeping the record of it.
+
+        Retirement is not deletion. A rule that was right for six months and
+        then wrong is evidence about the world changing, and a store that
+        silently drops it loses the ability to explain why last quarter's close
+        reconciled differently. It moves to ``retired`` with its reason.
+        """
+        for i, rule in enumerate(self.rules):
+            if rule.rule_id == rule_id:
+                self.retired.append((self.rules.pop(i), reason))
+                return rule
+        return None
 
     # ---- use ------------------------------------------------------------
     def resolve(self, context: dict[str, Any]) -> tuple[Rule, dict[str, Any]] | None:
@@ -239,8 +256,16 @@ def build_history(findings, bundle) -> list[ConfirmedCase]:
 
 
 def next_rule_id(store: RuleStore, kind: RuleKind) -> str:
-    n = sum(1 for r in store.rules if r.kind == kind) + 1
-    return f"{kind}_{n:03d}"
+    """Monotonic per kind, counting retired rules too.
+
+    Counting only live rules would reissue the id of a rule that was just
+    retired, so the replacement and the thing it replaced would share an
+    identifier - and every provenance trail through them would be ambiguous
+    exactly when someone most needs to follow it.
+    """
+    n = sum(1 for r in store.rules if r.kind == kind)
+    n += sum(1 for r, _ in store.retired if r.kind == kind)
+    return f"{kind}_{n + 1:03d}"
 
 
 def rule_from_proposal(
