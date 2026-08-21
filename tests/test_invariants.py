@@ -342,3 +342,96 @@ def test_alias_never_widens_the_strict_regex() -> None:
     none_at_all = BankCredit("b2", Money("100.00"), date(2026, 1, 1),
                              "MERCHANT SETTLEMENT CREDIT")
     assert extract_utr(none_at_all, store) is None
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the risk model is evaluated on data it never saw"
+# ---------------------------------------------------------------------------
+
+def test_train_and_holdout_seeds_never_overlap() -> None:
+    """The single mistake that would invalidate every ML number reported."""
+    from taper.ml.train import HOLDOUT_SEEDS, TRAIN_SEEDS
+
+    assert not set(TRAIN_SEEDS) & set(HOLDOUT_SEEDS)
+
+
+def test_overlapping_seeds_are_refused() -> None:
+    """Leakage must fail loudly, not silently produce a flattering curve."""
+    from taper.ml.train import train_and_evaluate
+
+    with pytest.raises(ValueError, match="overlap"):
+        train_and_evaluate(train_seeds=[1, 2], holdout_seeds=[2, 3], n_batches=5)
+
+
+def test_features_carry_no_matching_outcome() -> None:
+    """Features must come from the raw sources only.
+
+    If a feature encoded the matcher's decision the model would look brilliant
+    and predict nothing, so the vector is computed with no result object in
+    scope at all - enforced here by construction.
+    """
+    from taper.ml.features import FEATURE_NAMES, batch_features
+
+    case = generate(n_batches=10, seed=7)
+    batch_id = case.bundle.settlement[0].settlement_batch_id
+    feats = batch_features(case.bundle, batch_id)  # no ReconResult available
+    assert set(feats) == set(FEATURE_NAMES)
+    assert all(isinstance(v, float) for v in feats.values())
+
+
+def test_isotonic_calibrator_is_monotone() -> None:
+    """A higher score must never map to a lower probability."""
+    from taper.ml.confidence import IsotonicCalibrator
+
+    cal = IsotonicCalibrator().fit(
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        [0, 0, 1, 0, 1, 1, 0, 1, 1],
+    )
+    probs = [cal.predict(s / 20) for s in range(20)]
+    assert probs == sorted(probs), "calibrator produced a non-monotone mapping"
+    assert all(0.0 <= p <= 1.0 for p in probs)
+
+
+def test_risk_model_beats_quoting_the_base_rate() -> None:
+    """A model that cannot beat the average is not worth shipping.
+
+    Brier skill compares against always predicting the escalation base rate.
+    Guarding it stops a good-looking Brier from hiding a useless model.
+    """
+    from taper.ml.train import train_and_evaluate
+
+    _, report = train_and_evaluate(n_batches=20)
+    assert report.skill > 0.15, f"Brier skill only {report.skill:.3f}"
+    assert report.auc > 0.70, f"AUC only {report.auc:.3f}"
+
+
+def test_shipped_model_needs_no_third_party_package() -> None:
+    """The default backend must not import scikit-learn at all.
+
+    The dependency-free logistic model is the shipped default because it
+    measured better, so this guards against a future change quietly making
+    scikit-learn required.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+    touched: list[str] = []
+
+    def watched(name, *a, **kw):
+        if name.startswith("sklearn"):
+            touched.append(name)
+            raise ImportError("sklearn deliberately blocked")
+        return real_import(name, *a, **kw)
+
+    builtins.__import__ = watched
+    try:
+        from taper.ml.confidence import _make_model
+
+        model, is_sklearn = _make_model(seed=0)
+        assert not is_sklearn
+        model.fit([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [0.9, 0.1]], [0, 1, 0, 1])
+        assert 0.0 <= model.predict_proba([[0.2, 0.8]])[0] <= 1.0
+    finally:
+        builtins.__import__ = real_import
+
+    assert not touched, f"default path imported {touched}"
