@@ -506,3 +506,41 @@ def test_stress_actually_stresses() -> None:
     first, last = report.results[0], report.results[-1]
     assert last.recall < first.recall - 0.2, "top of the ladder barely hurt recall"
     assert last.exceptions > first.exceptions * 2, "escalations did not rise"
+
+
+def test_report_risk_section_refuses_a_training_seed() -> None:
+    """Reporting on a seed the model trained on would recall, not predict.
+
+    The "highest-risk batches" table would then be the model reciting labels it
+    had already seen, which is the most flattering and least honest thing the
+    report could show.
+    """
+    from argparse import Namespace
+
+    from taper.cli import _risk_for_report
+    from taper.ml.train import TRAIN_SEEDS
+
+    seed = TRAIN_SEEDS[0]
+    case = generate(n_batches=10, seed=seed)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    args = Namespace(seed=seed, batches=10)
+    assert _risk_for_report(case, result, args) is None
+
+
+def test_report_renders_the_risk_section_when_given_one() -> None:
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=15, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    risk = {
+        "brier": 0.06, "baseline": 0.13, "skill": 0.54, "auc": 0.9,
+        "budget": [(0.1, 0.6, 4)],
+        "reliability": [(0.1, 0.08, 0.05, 30), (0.9, 0.95, 0.92, 10)],
+        "top": [("setl_99_001", 0.91, 1), ("setl_99_002", 0.12, 0)],
+    }
+    html = render(result, _score(case, result, "mock"), case, "2026-06", None, risk)
+    assert "Where the work will be" in html
+    assert "setl_99_001" in html
+    assert "https://" not in html.replace('xmlns="http://www.w3.org/2000/svg"', "")
