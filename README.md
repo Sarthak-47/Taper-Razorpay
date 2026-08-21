@@ -89,32 +89,42 @@ manual review; a bad rule costs silent corruption across every close after it.
 
 ### The taper
 
-Five consecutive monthly closes, rule store carried forward, **averaged over 8
+Six consecutive monthly closes, rule store carried forward, **averaged over 8
 independent campaigns** (a single campaign is one noisy draw — averaging
 separates learning from month-to-month variance):
 
 | Month | Rules | Model calls / 100 records | Exceptions | Clean match rate | Precision | Recall |
 |---|---|---|---|---|---|---|
-| 1 | 1.6 | 0.96 | 12.0 | 48.6% | 1.000 | 0.902 |
-| 2 | 2.0 | 0.76 | 9.4 | 88.7% | 1.000 | 0.908 |
-| 3 | 2.0 | 0.69 | 8.4 | 93.3% | 1.000 | 0.917 |
-| 4 | 2.0 | 0.64 | 7.8 | 93.7% | 1.000 | 0.931 |
-| 5 | 2.0 | 0.71 | 8.4 | **97.6%** | 1.000 | 0.921 |
+| 1 | 1.9 | 0.82 | 10.0 | 62.0% | 1.000 | 0.911 |
+| 2 | 2.2 | 0.58 | 6.9 | 93.2% | 1.000 | 0.933 |
+| 3 | 2.5 | 0.54 | 6.8 | 93.2% | 1.000 | 0.934 |
+| 4 | 2.5 | 0.49 | 5.8 | 96.4% | 1.000 | 0.948 |
+| 5 | 2.5 | 0.61 | 7.1 | 95.5% | 1.000 | 0.931 |
+| 6 | 2.5 | 0.54 | 6.2 | **97.3%** | 1.000 | 0.940 |
 
-**Model calls per 100 records fall 27%. Clean match rate goes 48.6% → 97.6%.
-Human reviews per close drop 12.0 → 8.4. Precision stays at 1.000 the whole way.**
+**Model calls per 100 records fall 33%. Clean match rate goes 62.0% → 97.3%.
+Human reviews per close drop 10.0 → 6.2. Recall rises 0.911 → 0.940. Precision
+stays at 1.000 the whole way.**
 
-The system learns exactly two rules — the AXIS ₹250 processing charge and the
-SBI ₹500 service charge — and those two rules are worth ~49 points of match rate,
-because before they exist every payout from those banks is an unexplained
-shortfall that costs an exception, a model call, and a human's attention.
+Three patterns are learnable in this world, and the system finds them:
 
-Note what does **not** happen: the one-off adjustments are never learned. They are
+| Rule | Learned | What it buys |
+|---|---|---|
+| `adjustment_pattern` | AXIS ₹250 "PROC CHG", SBI ₹500 "SVC CHG" | Recurring deductions stop reading as unexplained shortfalls |
+| `narration_alias` | KOTAK writes `REF 70000123456`, the report says `UTR70000123456` | A bank whose reference label the strict regex cannot parse becomes joinable |
+| `bank_timing` | rarely fires — see below | Extends the settlement window for a slow bank |
+
+Note what does **not** happen: one-off adjustments are never learned. They are
 genuine anomalies, they stay anomalies, and a test enforces that the store never
 generalises one. A rule store that absorbed those would be overfitting to noise.
 
+**Honest note on `bank_timing`:** it is implemented, gated and tested, but it
+rarely triggers — it requires a batch's exact amount to land outside the default
+window, which is uncommon. It is not carrying the result. The taper is driven by
+`adjustment_pattern` and `narration_alias`.
+
 ```bash
-python -m taper.cli campaign --months 5 --average-runs 8
+python -m taper.cli campaign --months 6 --average-runs 8
 ```
 
 ### Single-close accuracy
@@ -123,15 +133,19 @@ Deterministic layers only, 40 batches (~1,300 records) per seed:
 
 | Seed | Records | Precision | Recall | Clean match rate |
 |---|---|---|---|---|
-| 7 | 1,234 | 1.000 | 1.000 | 90.0% |
-| **99** *(held out)* | 1,334 | **1.000** | **0.931** | 91.7% |
-| 1234 | 1,301 | 1.000 | 0.920 | 89.2% |
-| 2025 | 1,261 | 1.000 | 0.927 | 97.2% |
+| 7 | 1,341 | 1.000 | 0.861 | 53.1% |
+| **99** *(held out)* | 1,356 | **1.000** | **0.897** | 60.6% |
+| 1234 | 1,363 | 1.000 | 0.878 | 69.7% |
+| 2025 | 1,362 | 1.000 | 0.928 | 47.2% |
+
+These are month-one numbers with an **empty rule store** — the honest cold-start
+baseline. Match rate is low because roughly half the banks take a recurring
+charge nobody has explained yet. That is the gap the campaign above closes.
 
 Precision is 1.000 across every seed — **zero false positives**, enforced as a
-test rather than merely observed. Recall sits at 0.92–0.93 on unseen seeds, and
-the ~7% it misses is not silently dropped: it lands on the exception list with a
-stated reason.
+test rather than merely observed. Cold-start recall is 0.86–0.93; what it misses
+is not silently dropped but lands on the exception list with a stated reason, and
+recall climbs to 0.94 once the rule store fills.
 
 Per-class precision and recall, calibration, false-positive cost in review-minutes,
 and the auto-clear operating point all print from `reconcile`.
@@ -278,7 +292,12 @@ affect a single future close.
 
 Running end-to-end: 30 tests green, five CLI commands, no API key required.
 
+All four layers are wired, and three of the four rule types learn end to end
+(`adjustment_pattern`, `narration_alias`, `bank_timing`). Combined defects — a
+batch both split across credits *and* short by a recurring charge — now resolve
+deterministically via candidate-target subset netting.
+
 Remaining work: real-model evaluation runs (everything to date is either
-deterministic or against the offline mock), combined-defect verification, and
-`bank_timing` / `narration_alias` rule learning — the rule types exist and are
-gated, but only `adjustment_pattern` is currently proposed by the oracle.
+deterministic or against the offline mock), `fee_variant` rule learning, and
+`verify_proposal` support for combined claims so layer 3 can resolve the same
+shapes layer 1 now handles.
