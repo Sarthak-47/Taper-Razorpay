@@ -48,6 +48,7 @@ Four more things worth thirty seconds each:
 | `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
 | `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
 | `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
+| `taper resolve` | Teach the store what a human worked out — through the admission gate |
 | `taper doctor` | What this machine can run, and the exact command to type next |
 | `taper --llm ollama reconcile` | Layer 3 against a **local model, no API key** — and an ablation that honestly reports it added nothing |
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
@@ -60,7 +61,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**100 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**111 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -348,6 +349,34 @@ and lets fixed code do the extraction — because a store that accepted patterns
 the model wrote would be executing attacker-reachable text against every future
 narration, for no benefit.
 
+### The loop, through the actual CLI
+
+The campaign proves the taper in simulation. This is the same loop as a tool
+you would run monthly — and until recently it did not exist: learning happened
+only inside `campaign`, driven by a simulated reviewer, so `reconcile
+--persist-rules` wrote an empty store forever.
+
+```bash
+python -m taper.cli --no-llm reconcile --seed 502 --persist-rules
+#   clean match rate 61.1%   exceptions 10
+
+python -m taper.cli resolve --seed 501 --charge "PROC CHG" 250.00
+python -m taper.cli resolve --seed 501 --charge "SVC CHG" 500.00
+python -m taper.cli resolve --seed 501 --rate intl_card 0.03
+python -m taper.cli resolve --seed 501 --alias REF UTR
+
+python -m taper.cli --no-llm reconcile --seed 502 --persist-rules
+#   clean match rate 94.7%   exceptions 4
+```
+
+**61.1% → 94.7%, ten exceptions down to four**, with no model in the loop at
+all — four facts a human already knew, taught once.
+
+Nothing is taken on trust. `resolve` re-derives the close, replays the
+candidate against every confirmed case in it, and writes only if it
+contradicts none. `--retire` withdraws a rule that has stopped being true,
+keeping it in the store's retired list so a past close can still be explained.
+
 ### Rule lifecycle — learn, drift, detect, retire, relearn
 
 A rule store that only grows is a liability. Everything above shows learning
@@ -538,32 +567,47 @@ window. A test now guards against either knob quietly becoming a no-op.
 python -m taper.cli stress
 ```
 
-### Three bugs the harness caught, and what they cost
+### What the harness caught
 
-All three were found by measurement, not by reading the code:
+Thirteen real defects so far, none found by reading the code — every one
+surfaced by ground-truth scoring, a benchmark, an audit or a lint warning. The
+five that changed the design:
 
-1. **Duplicate captures were double-reported** as missing ledger entries — 20 false
-   positives on one seed. A duplicate has no ledger entry *by definition*, so two
-   findings described one problem and a controller would chase the same rupee twice.
-2. **A learned rule fabricated a defect class.** When an `adjustment_pattern` rule
-   matched a narration, the pipeline defaulted its verdict to
-   `UNRECORDED_ADJUSTMENT` — stamping that label onto any exception it happened to
-   match, including orphan bank credits it had no opinion about. Precision decayed
-   from 1.000 to 0.966 *as the rule store grew*, which is the worst possible
-   failure shape: the system got less trustworthy the more it learned.
+1. **The admission gate was vacuous in production.** Confirmed history recorded
+   only `defect_class`, while every rule verdict returns `rate`, `amount` or
+   `utr`. The keys never overlapped, so across a hundred confirmed cases **not
+   one candidate could ever be rejected** — the headline safety mechanism was a
+   no-op, and invisible to the tests because every gate test hand-built cases
+   with keys chosen to match. History is now stated in the same terms a rule
+   asserts, and a bad alias is refused against 23 real cases.
 
-3. **Label noise crippled the risk model.** The first version attributed every
-   unclaimed bank credit back to any batch sharing its settlement window. That
-   looked like better coverage and was in fact noise — an orphan credit sits in
-   the window of several perfectly clean batches, so it marked them all as
-   needing review. About a fifth of the positive labels were batches that never
-   escalated. Fixing the *label* took **AUC 0.701 → 0.847** and Brier skill
-   **0.142 → 0.466**, without touching the model at all.
+2. **A learned rule fabricated a defect class.** An `adjustment_pattern` rule
+   whose verdict names only a *category* stamped `UNRECORDED_ADJUSTMENT` onto
+   any exception it happened to match, including orphan credits it had no
+   opinion about. Precision decayed 1.000 → 0.966 **as the rule store grew** —
+   the worst possible shape: less trustworthy the more it learned.
 
-The fix for the second one became a design rule — **a rule with no verdict on an
-item must leave the item alone** — and a test that fails if any month of a campaign
-drops below 1.000 precision. The third is why the labelling logic now carries a
-comment spelling out what it must not do.
+3. **The matcher was quadratic.** `taper bench` found per-record cost climbing
+   2.5 µs → 13.3 µs across a 50× input, because matching rescanned every
+   unclaimed credit per batch and ran a regex on each. Indexed: flat at ~1.5 µs,
+   9× faster at scale.
+
+4. **An "unrecorded adjustment" could be any size.** The gate confirmed a
+   ₹64,051 adjustment on a ₹64,051 credit — the batch's missing half wearing a
+   deduction's name. It cost 0.999 precision in one campaign month, which a
+   single campaign had hidden.
+
+5. **Security warnings were silently discarded.** The early-return path
+   *assigned* `result.exceptions` instead of extending it, dropping every
+   injection warning on deterministic-only runs — exactly the path such a
+   warning most needs to survive.
+
+Also caught: label noise crippling the risk model (AUC 0.701 → 0.847 from
+fixing the *label*, not the model), duplicate captures double-reported as
+missing ledger entries, a repricing relearned under the wrong bank's keyword,
+rule-store persistence losing retirements and then reissuing live ids, a
+missing settlement report reading as a spotless close, and `ablate` dropping
+the provider flags so the one command that measures the model could not reach it.
 
 ### Honest limitations
 
