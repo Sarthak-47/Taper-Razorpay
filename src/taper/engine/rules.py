@@ -108,7 +108,13 @@ class Rule:
         if self.kind == "fee_variant":
             return {"rate": self.params["rate"]}
         if self.kind == "adjustment_pattern":
-            return {"category": self.params["category"]}
+            # The amount is the load-bearing claim, not the category. A rule
+            # asserting only a label cannot be contradicted by anything, which
+            # made the admission gate unable to reject it.
+            verdict: dict[str, Any] = {"category": self.params["category"]}
+            if "amount" in self.params:
+                verdict["amount"] = str(self.params["amount"])
+            return verdict
         return {}
 
 
@@ -263,30 +269,75 @@ class RuleStore:
 
 
 def build_history(findings, bundle) -> list[ConfirmedCase]:
-    """Turn confidence-1.0 deterministic findings into the regression suite.
+    """Turn what we already know for certain into the regression suite.
 
-    Only certainties go in. A case the engine was unsure about is not evidence
-    of anything, and admitting rules against soft cases would let one guess
-    justify the next.
+    Each case has to be stated in the *same terms a rule asserts*, or the gate
+    has nothing to compare and silently admits everything. That is not
+    hypothetical: an earlier version recorded only ``defect_class`` while every
+    verdict returned ``rate``, ``amount`` or ``utr``. The keys never overlapped,
+    so across a real close of a hundred confirmed cases not one candidate could
+    ever be rejected - the gate was mechanically correct and completely vacuous.
+
+    So each entry below pairs a context that makes some rule applicable with the
+    value that rule must not contradict.
     """
+    from .matching import UTR_PATTERN
+
     cases: list[ConfirmedCase] = []
     bank_by_id = {c.bank_txn_id: c for c in bundle.bank}
 
+    # 1. References we can already read. A narration_alias that extracts a
+    #    different value from a narration the strict regex already resolves is
+    #    wrong, whatever else it might fix.
+    for credit in bundle.bank:
+        hit = UTR_PATTERN.search(credit.narration.upper())
+        if hit:
+            cases.append(
+                ConfirmedCase(
+                    subject_id=credit.bank_txn_id,
+                    context={"narration": credit.narration},
+                    correct={"utr": hit.group(0)},
+                )
+            )
+
+    # 2. Contracted rates and charge amounts confirmed by this close.
     for f in findings:
         if f.confidence < 1.0:
             continue
-        ctx: dict[str, Any] = {"subject_id": f.subject_id}
-        ctx.update({k: v for k, v in f.evidence.items() if isinstance(v, (str, int, float))})
-        bank_id = f.evidence.get("bank_txn_id")
-        if bank_id and bank_id in bank_by_id:
-            ctx["narration"] = bank_by_id[bank_id].narration
-        cases.append(
-            ConfirmedCase(
-                subject_id=f.subject_id,
-                context=ctx,
-                correct={"defect_class": f.defect_class.value},
+        evidence = f.evidence
+
+        # Deliberately NOT recorded: contracted rates. The rate in a fee
+        # finding is the rate the engine *assumed*, not one anybody confirmed -
+        # a contracted rate is only knowable from the merchant agreement. An
+        # earlier version treated it as fact and the gate then rejected the
+        # correct 3% international-card rule for contradicting the 2% default
+        # it was there to replace. The gate must replay against confirmed
+        # facts, never against its own current assumptions.
+
+        # Observed shortfalls, but only where a rule did not produce them. A
+        # rule-derived amount would just be the rule confirming itself.
+        amount = evidence.get("amount")
+        bank_id = evidence.get("bank_txn_id")
+        credit = bank_by_id.get(bank_id) if bank_id else None
+        if amount and credit is not None and f.rule_id is None:
+            cases.append(
+                ConfirmedCase(
+                    subject_id=f.subject_id,
+                    context={"narration": credit.narration},
+                    correct={"amount": str(amount)},
+                )
             )
-        )
+
+        offset = evidence.get("offset_days")
+        if offset is not None and evidence.get("bank"):
+            cases.append(
+                ConfirmedCase(
+                    subject_id=f.subject_id,
+                    context={"bank": evidence["bank"]},
+                    correct={"expected_offset_days": offset},
+                )
+            )
+
     return cases
 
 

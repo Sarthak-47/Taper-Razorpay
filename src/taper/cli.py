@@ -412,6 +412,104 @@ def _risk_for_report(case, result, args) -> dict | None:
     }
 
 
+def cmd_resolve(args) -> None:
+    """Teach the store what a human worked out, through the admission gate.
+
+    This is the loop the campaign simulates, made real. Until now learning only
+    happened inside ``campaign``, driven by a simulated reviewer - so the CLI a
+    person would actually run monthly could *use* a rule store but never grow
+    one, and ``reconcile --persist-rules`` wrote an empty file forever.
+
+    A resolution is not taken on trust. The close is re-derived, the candidate
+    rule is replayed against every confirmed case in it, and it is admitted only
+    if it changes none of them.
+    """
+    from datetime import date
+
+    from .engine.rules import Rule, RuleStore, build_history, next_rule_id
+
+    store_path = Path(args.store)
+    store = RuleStore(store_path)
+    before = len(store)
+
+    print(BAR)
+    print("  RESOLVE - teach the store what a human worked out")
+    print(BAR)
+
+    if args.retire:
+        rule_id, reason = args.retire
+        gone = store.retire(rule_id, reason)
+        if gone is None:
+            print(f"  no live rule with id {rule_id}")
+            print(BAR)
+            return
+        store.save()
+        print(f"  retired {rule_id} (was {gone.params.get('amount', '-')}) - {reason}")
+        print("  Kept in the store's retired list, so a past close can still be")
+        print(f"  explained. Store: {len(store)} live -> {store_path}")
+        print(BAR)
+        return
+
+    candidate = _rule_from_args(args)
+    if candidate is None:
+        print("  Nothing to learn. Give one of --charge, --rate, --alias or --retire.")
+        print(BAR)
+        return
+
+    # Re-derive the close so the gate has real confirmed cases to replay against.
+    case = generate(n_batches=args.batches, seed=args.seed)
+    result = reconcile(case.bundle, store=store, config=RunConfig(use_llm=False))
+    history = build_history(result.findings, case.bundle)
+
+    rule = Rule(
+        rule_id=next_rule_id(store, candidate["kind"]),
+        kind=candidate["kind"],
+        params=candidate["params"],
+        origin_exception=args.origin or f"resolved by hand on seed {args.seed}",
+        learned_on=str(date.today()),
+        confidence=1.0,
+    )
+    outcome = store.propose(rule, history)
+
+    print(f"  candidate   {rule.rule_id}  {rule.kind}")
+    print(f"  params      {rule.params}")
+    print(f"  replayed against {len(history)} confirmed case(s) from seed {args.seed}")
+    print(f"\n  {'ADMITTED' if outcome.admitted else 'REJECTED'}: {outcome.reason}")
+    for regression in outcome.regressions[:5]:
+        print(f"      {regression}")
+
+    if outcome.admitted:
+        store.save()
+        print(f"\n  store: {before} -> {len(store)} rule(s) at {store_path}")
+        print("  The next close that sees this pattern resolves it at layer 2,")
+        print("  deterministically and with no model call.")
+    else:
+        print("\n  Nothing was written. The originating item stays an exception.")
+    print(BAR)
+
+
+def _rule_from_args(args) -> dict | None:
+    """Turn the operator's flags into one typed rule, or nothing."""
+    if args.charge:
+        keyword, amount = args.charge
+        return {
+            "kind": "adjustment_pattern",
+            "params": {
+                "keyword": keyword.upper(),
+                "category": "bank_recurring_charge",
+                "amount": str(Money(amount).quantize(Money("0.01"))),
+            },
+        }
+    if args.rate:
+        method, rate = args.rate
+        return {"kind": "fee_variant", "params": {"method": method.lower(), "rate": str(rate)}}
+    if args.alias:
+        marker, prefix = args.alias
+        return {"kind": "narration_alias", "params": {"marker": marker.upper(),
+                                                      "prefix": prefix}}
+    return None
+
+
 def cmd_doctor(args) -> None:
     """Say what this machine can run, and exactly what to type next."""
     from .diagnose import run
@@ -804,6 +902,22 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)
+
+    rs = sub.add_parser("resolve", parents=[shared],
+                        help="teach the store a rule, through the admission gate")
+    rs.add_argument("--seed", type=int, default=99,
+                    help="the close to replay the candidate rule against")
+    rs.add_argument("--store", default=str(RULE_STORE_PATH))
+    rs.add_argument("--origin", default=None, help="who or what resolved it")
+    rs.add_argument("--charge", nargs=2, metavar=("KEYWORD", "AMOUNT"),
+                    help='a recurring bank charge, e.g. --charge "PROC CHG" 250.00')
+    rs.add_argument("--rate", nargs=2, metavar=("METHOD", "RATE"),
+                    help="a contracted rate, e.g. --rate intl_card 0.03")
+    rs.add_argument("--alias", nargs=2, metavar=("MARKER", "PREFIX"),
+                    help="how a bank labels its reference, e.g. --alias REF UTR")
+    rs.add_argument("--retire", nargs=2, metavar=("RULE_ID", "REASON"),
+                    help="withdraw a rule that has stopped being true")
+    rs.set_defaults(func=cmd_resolve)
 
     doc = sub.add_parser("doctor", parents=[shared],
                          help="what this machine can run, and what to type next")

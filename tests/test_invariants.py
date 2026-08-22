@@ -1705,3 +1705,89 @@ def test_the_report_renders_an_empty_close() -> None:
 
     assert "</html>" in html
     assert "close digest" in html, "the digest belongs on the artifact people keep"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the admission gate actually fires on a real close"
+# ---------------------------------------------------------------------------
+
+def _real_history(seed: int = 501):
+    from taper.engine.rules import build_history
+
+    case = generate(n_batches=40, seed=seed)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    return build_history(result.findings, case.bundle)
+
+
+def test_gate_is_not_vacuous_on_history_from_a_real_close() -> None:
+    """The gate has to be able to reject something it was not handed by a test.
+
+    Every other gate test builds ConfirmedCase by hand with keys chosen to
+    match. Production history is built by build_history, and for a long time it
+    recorded only ``defect_class`` while every verdict returned ``rate``,
+    ``amount`` or ``utr``. The keys never overlapped, so across a hundred
+    confirmed cases not one candidate could ever be rejected - mechanically
+    correct, completely vacuous, and invisible to the unit tests.
+    """
+    from taper.engine.rules import Rule, RuleStore
+
+    history = _real_history()
+    assert history, "a real close produced no confirmed cases at all"
+
+    verdict_keys = {"utr", "amount", "rate", "expected_offset_days"}
+    recorded = {k for case in history for k in case.correct}
+    assert recorded & verdict_keys, (
+        f"history records {recorded}, which no rule verdict can contradict - "
+        f"the gate cannot fire"
+    )
+
+    # An alias that drops the prefix extracts a different reference from
+    # narrations the strict regex already resolves. It must be refused.
+    bad = Rule("narration_alias_bad", "narration_alias",
+               {"marker": "UTR", "prefix": ""}, "x", "2026-01-01")
+    outcome = RuleStore().propose(bad, history)
+    assert not outcome.admitted, "a rule that would misread known references was admitted"
+    assert outcome.regressions
+
+
+def test_gate_admits_the_rules_the_system_is_meant_to_learn() -> None:
+    """Rejecting everything would be just as useless as rejecting nothing."""
+    from taper.engine.rules import Rule, RuleStore
+
+    history = _real_history()
+    for kind, params in (
+        ("fee_variant", {"method": "intl_card", "rate": "0.03"}),
+        ("narration_alias", {"marker": "REF", "prefix": "UTR"}),
+        ("adjustment_pattern", {"keyword": "PROC CHG",
+                                "category": "bank_recurring_charge", "amount": "250.00"}),
+    ):
+        outcome = RuleStore().propose(
+            Rule(f"{kind}_ok", kind, params, "x", "2026-01-01"), history
+        )
+        assert outcome.admitted, f"{kind} was refused: {outcome.reason}"
+
+
+def test_history_never_records_an_assumed_rate_as_confirmed() -> None:
+    """The gate must replay against facts, not against its own defaults.
+
+    A fee finding names the rate the engine *assumed*, not one anyone
+    confirmed - a contracted rate is only knowable from the merchant
+    agreement. Recording it as fact made the gate reject the correct 3%
+    international-card rule for contradicting the 2% default it existed to
+    replace.
+    """
+    history = _real_history()
+    assert not any("rate" in case.correct for case in history), (
+        "an assumed rate was recorded as a confirmed fact"
+    )
+
+
+def test_adjustment_rule_asserts_its_amount_not_just_a_label() -> None:
+    """A rule claiming only a category cannot be contradicted by anything."""
+    from taper.engine.rules import Rule
+
+    rule = Rule("adjustment_pattern_001", "adjustment_pattern",
+                {"keyword": "PROC CHG", "category": "bank_recurring_charge",
+                 "amount": "250.00"}, "x", "2026-01-01")
+    verdict = rule.verdict({"narration": "IMPS AXIS PROC CHG"})
+    assert verdict.get("amount") == "250.00", "the load-bearing claim is missing"
