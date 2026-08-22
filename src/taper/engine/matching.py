@@ -948,6 +948,47 @@ def check_rule_health(
     return exceptions
 
 
+def check_sources_present(bundle: SourceBundle) -> list[Exception_]:
+    """Say when a source is missing, rather than reporting a clean close.
+
+    With no settlement report there is nothing to reconcile against, so every
+    check returns empty and the close comes back spotless. That is the most
+    dangerous possible output: a controller reads "no exceptions" and signs off
+    on a period nobody actually checked.
+
+    Missing inputs are an exception, not a crash - the other sources may still
+    be worth looking at, and refusing to run at all would be less useful than
+    running and saying what is absent.
+    """
+    exceptions: list[Exception_] = []
+    if not bundle.settlement and (bundle.ledger or bundle.bank):
+        exceptions.append(
+            Exception_(
+                subject_id="sources::settlement",
+                kind="missing_source",
+                context={"have_ledger": len(bundle.ledger), "have_bank": len(bundle.bank)},
+                reason=(
+                    "No settlement report was supplied, so nothing could be "
+                    "reconciled. The empty finding list below means 'not checked', "
+                    "not 'nothing wrong'."
+                ),
+            )
+        )
+    if not bundle.bank and bundle.settlement:
+        exceptions.append(
+            Exception_(
+                subject_id="sources::bank",
+                kind="missing_source",
+                context={"have_settlement": len(bundle.settlement)},
+                reason=(
+                    "No bank statement was supplied. Transaction-level checks ran, "
+                    "but no payout could be confirmed to have arrived."
+                ),
+            )
+        )
+    return exceptions
+
+
 def run_deterministic(
     bundle: SourceBundle,
     store=None,
@@ -977,4 +1018,5 @@ def run_deterministic(
     # Ask whether anything we learned has stopped being true. Runs last because
     # it reads the matches the earlier layers produced.
     stale = check_rule_health(matches, bundle, store)
-    return matches, findings, fee_exceptions + stale + exceptions
+    missing = check_sources_present(bundle)
+    return matches, findings, missing + fee_exceptions + stale + exceptions

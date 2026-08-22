@@ -1615,3 +1615,93 @@ def test_doctor_recommends_a_command_that_actually_parses() -> None:
         main([*argv[3:], "--help"])
     except SystemExit as exc:
         assert exc.code == 0, "the recommended command does not parse"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "an empty finding list never means 'nothing wrong' by accident"
+# ---------------------------------------------------------------------------
+
+def test_a_missing_settlement_report_is_reported_not_ignored() -> None:
+    """The most dangerous possible output is a spotless close nobody checked.
+
+    With no settlement report every check returns empty and the close comes
+    back clean. A controller reads "no exceptions" and signs off on a period
+    that was never reconciled.
+    """
+    from datetime import date
+
+    from taper.models import LedgerEntry, SourceBundle
+
+    bundle = SourceBundle(
+        ledger=[LedgerEntry("o1", "t1", Money("100.00"), date(2026, 6, 1))]
+    )
+    result = reconcile(bundle, config=RunConfig(use_llm=False))
+
+    missing = [e for e in result.exceptions if e.kind == "missing_source"]
+    assert missing, "a close with no settlement report reported nothing at all"
+    assert "not checked" in missing[0].reason
+
+
+def test_a_missing_bank_statement_is_reported() -> None:
+    """Transaction checks can still run, but no payout can be confirmed."""
+    from datetime import date
+
+    from taper.models import SettlementRow, SourceBundle, TxnType
+
+    bundle = SourceBundle(settlement=[
+        SettlementRow("t1", "b1", "UTR123456", TxnType.PAYMENT, Money("100.00"),
+                      Money("2.00"), Money("0.36"), date(2026, 6, 1), "o1")
+    ])
+    result = reconcile(bundle, config=RunConfig(use_llm=False))
+    kinds = {e.kind for e in result.exceptions}
+    assert "missing_source" in kinds
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_complete_close_reports_no_missing_sources(seed: int) -> None:
+    """The guard must not fire on a normal period."""
+    case = generate(n_batches=40, seed=seed)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    assert not [e for e in result.exceptions if e.kind == "missing_source"]
+
+
+def test_degenerate_inputs_never_crash() -> None:
+    """Whatever someone points this at, it must produce a close or say why."""
+    from datetime import date
+
+    from taper.models import BankCredit, LedgerEntry, SettlementRow, SourceBundle, TxnType
+
+    bundles = {
+        "empty": SourceBundle(),
+        "bank only": SourceBundle(
+            bank=[BankCredit("bk1", Money("100.00"), date(2026, 6, 1), "NEFT")]
+        ),
+        "ledger only": SourceBundle(
+            ledger=[LedgerEntry("o1", "t1", Money("100.00"), date(2026, 6, 1))]
+        ),
+        "zero amounts": SourceBundle(settlement=[
+            SettlementRow("t1", "b1", None, TxnType.PAYMENT, Money("0.00"),
+                          Money("0.00"), Money("0.00"), date(2026, 6, 1), "o1")
+        ]),
+    }
+    for name, bundle in bundles.items():
+        result = reconcile(bundle, config=RunConfig(use_llm=False))
+        assert result.records_processed == len(bundle), name
+        for exc in result.exceptions:
+            assert exc.reason.strip(), f"{name}: exception with no reason"
+
+
+def test_the_report_renders_an_empty_close() -> None:
+    """A period with nothing in it still has to produce a readable document."""
+    from taper.generator import GeneratedCase
+    from taper.metrics.harness import score as _score
+    from taper.models import SourceBundle
+    from taper.report import render
+
+    bundle = SourceBundle()
+    result = reconcile(bundle, config=RunConfig(use_llm=False))
+    case = GeneratedCase(bundle=bundle, defects=[])
+    html = render(result, _score(case, result, "none"), case, "2026-06")
+
+    assert "</html>" in html
+    assert "close digest" in html, "the digest belongs on the artifact people keep"

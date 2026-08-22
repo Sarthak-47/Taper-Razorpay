@@ -16,6 +16,7 @@ import html
 from datetime import datetime
 from typing import Any
 
+from .attest import attest
 from .engine.results import Layer, ReconResult
 from .metrics.harness import (
     Scorecard,
@@ -610,7 +611,10 @@ def render(
         "<div class='wrap'>",
         f"<h1>Reconciliation close — {_esc(period)}</h1>",
         f"<p class='sub'>Generated {datetime.now():%Y-%m-%d %H:%M} · "
-        f"resolver <span class='mono'>{_esc(card.client_name)}</span></p>",
+        f"resolver <span class='mono'>{_esc(card.client_name)}</span><br>"
+        f"close digest <span class='mono'>{_esc(attest(result).line())}</span> — "
+        f"covers matches, findings and exceptions, not timestamps or wording, so "
+        f"a regenerated report hashes identically and only real change shows</p>",
     ]
 
     if is_mock:
