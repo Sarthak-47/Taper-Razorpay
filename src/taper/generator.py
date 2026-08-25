@@ -14,6 +14,7 @@ Two things matter for the submission:
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -91,6 +92,11 @@ METHOD_RATES = {
 }
 METHOD_WEIGHTS = [("upi", 0.45), ("card", 0.35), ("netbanking", 0.12), ("intl_card", 0.08)]
 
+# Spanning ~4 decades, which is what a real merchant sees - small UPI payments
+# through large orders - and what Benford's law needs to hold at all. The old
+# 250-12000 range covered 1.7 decades and could not conform however it was drawn.
+GROSS_RANGE = (30, 500000)
+
 
 def _pick_method(rng: random.Random) -> str:
     roll = rng.random()
@@ -138,6 +144,10 @@ class DefectRates:
     missing_ledger_entry: float = 0.02
     unsettled_revenue: float = 0.02
     chargeback_hold: float = 0.02
+    # Fabrication is concentrated, not sprinkled: one compromised channel, one
+    # operator. Spreading it evenly would hide it in the honest majority, which
+    # is precisely the mistake segment testing exists to avoid.
+    fabricated_channel: float = 0.5
 
 
 @dataclass
@@ -150,10 +160,40 @@ class GeneratedCase:
 
 
 def _money(rng: random.Random, low: int, high: int) -> Money:
-    """Amounts with realistic paise, not round numbers - rounding bugs hide there."""
-    rupees = rng.randint(low, high)
+    """A realistically distributed amount, with paise.
+
+    Drawn **log-uniformly**, not uniformly. Real payment volumes are dominated
+    by small transactions with a long tail of large ones, which is why genuine
+    financial amounts approximately follow Benford's law - first digit 1 about
+    30% of the time, 9 under 5%.
+
+    A uniform draw does not: it produces a nearly flat 8-12% across every first
+    digit. That was the old behaviour, and it made the whole population look
+    fabricated to the forensic check in ``forensics.py`` - correctly, because it
+    was. Getting this right is what lets that check mean anything.
+
+    Paise are kept non-round for the original reason: rounding bugs hide in
+    clean numbers.
+    """
+    log_low, log_high = math.log(low), math.log(high)
+    rupees = int(math.exp(rng.uniform(log_low, log_high)))
     paise = rng.choice([0, 0, 25, 50, 49, 99, 75])
     return (Money(rupees) + Money(paise) / Money(100)).quantize(Money("0.01"))
+
+
+def _fabricated(rng: random.Random, low: int, high: int) -> Money:
+    """An amount somebody made up rather than one that happened.
+
+    Invented figures cluster on round numbers and favour middle and high first
+    digits - a person typing a plausible-looking total reaches for 5,000 far
+    more often than chance, and almost never for 1,043.75. That signature is
+    what a first-digit test detects, and it is why the technique survives in
+    forensic accounting despite being a century old.
+    """
+    lead = rng.choice([2, 3, 4, 5, 5, 6, 7, 8, 9])
+    magnitude = rng.choice([100, 500, 1000])
+    value = lead * magnitude
+    return Money(min(max(value, low), high)).quantize(Money("0.01"))
 
 
 def _fee_for(gross: Money, rate: Decimal = CONTRACTED_FEE_RATE) -> tuple[Money, Money]:
@@ -190,6 +230,13 @@ def generate(
     bank: list[BankCredit] = []
     defects: list[InjectedDefect] = []
 
+    # One channel's amounts may be authored rather than lived. Concentrated in
+    # a single method so a segment test can find it - which is how fabrication
+    # actually presents.
+    fabricated_method = (
+        _pick_method(rng) if rng.random() < rates.fabricated_channel else None
+    )
+
     # Refunds deliberately pushed into the *next* cycle are parked here.
     carried_refunds: list[SettlementRow] = []
     counter = 0
@@ -215,8 +262,10 @@ def generate(
             counter += 1
             txn_id = f"pay_{seed}_{counter:05d}"
             order_id = f"ord_{seed}_{counter:05d}"
-            gross = _money(rng, 250, 12000)
+            gross = _money(rng, *GROSS_RANGE)
             method = _pick_method(rng)
+            if method == fabricated_method:
+                gross = _fabricated(rng, *GROSS_RANGE)
             fee, gst = _fee_for(gross, METHOD_RATES[method])
 
             # --- fee_overcharge: PG quietly bills above the contracted rate ---
@@ -328,7 +377,7 @@ def generate(
                 counter += 1
                 orphan_txn = f"pay_{seed}_{counter:05d}"
                 orphan_order = f"ord_{seed}_{counter:05d}"
-                orphan_amt = _money(rng, 250, 12000)
+                orphan_amt = _money(rng, *GROSS_RANGE)
                 ledger.append(
                     LedgerEntry(
                         order_id=orphan_order,
@@ -471,6 +520,15 @@ def generate(
                     utr=clean_utr,
                 )
             )
+
+    if fabricated_method:
+        defects.append(
+            InjectedDefect(
+                DefectClass.FABRICATED_AMOUNTS,
+                f"segment::{fabricated_method}",
+                {"method": fabricated_method},
+            )
+        )
 
     bundle = SourceBundle(
         ledger=ledger, settlement=settlement, bank=bank, period=f"{start:%Y-%m}"

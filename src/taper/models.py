@@ -59,6 +59,9 @@ class DefectClass(StrEnum):
     # Money the gateway is holding back pending a dispute. Not lost, not
     # available, and invisible in the payout unless someone looks for it.
     CHARGEBACK_HOLD = "chargeback_hold"
+    # A whole population of amounts that looks authored rather than lived.
+    # Detected statistically, at segment level, never per transaction.
+    FABRICATED_AMOUNTS = "fabricated_amounts"
 
 
 @dataclass(frozen=True)

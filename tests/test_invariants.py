@@ -1791,3 +1791,96 @@ def test_adjustment_rule_asserts_its_amount_not_just_a_label() -> None:
                  "amount": "250.00"}, "x", "2026-01-01")
     verdict = rule.verdict({"narration": "IMPS AXIS PROC CHG"})
     assert verdict.get("amount") == "250.00", "the load-bearing claim is missing"
+
+
+# ---------------------------------------------------------------------------
+# Claim: "first-digit analysis screens for authored amounts without crying wolf"
+# ---------------------------------------------------------------------------
+
+def test_generated_amounts_look_like_real_money() -> None:
+    """The forensic check is meaningless unless honest data conforms.
+
+    Amounts are drawn log-uniformly across ~4 decades, because that is what
+    real payment volume looks like and what Benford's law requires. A uniform
+    draw produces a flat 8-12% across every first digit and makes the entire
+    population look fabricated - correctly, because it would be.
+    """
+    from taper.forensics import BENFORD, profile
+
+    case = generate(n_batches=60, seed=1234)
+    amounts = [r.gross_amount for r in case.bundle.settlement if r.gross_amount > 0]
+    prof = profile(amounts)
+
+    assert prof.n > 500
+    # Leading 1 must dominate and 9 must be rare - the shape, not just a metric.
+    assert prof.observed[1] > prof.observed[9] * 2.5
+    assert prof.observed[1] > 0.20
+    assert abs(prof.observed[1] - BENFORD[1]) < 0.12
+
+
+def test_fabricated_channel_is_detected_without_false_alarms() -> None:
+    """Precision matters more than recall for a screen.
+
+    A flag costs a human an investigation. Missing one fabricated channel is a
+    missed opportunity; flagging three honest ones teaches the controller to
+    ignore the section. Measured across thirty independent periods.
+    """
+    hits = misses = false_alarms = 0
+    for seed in range(500, 530):
+        case = generate(n_batches=60, seed=seed)
+        result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+        truth = {
+            d.subject_id for d in case.defects
+            if d.defect_class.value == "fabricated_amounts"
+        }
+        flagged = {e.subject_id for e in result.exceptions
+                   if e.kind == "fabricated_amounts"}
+        hits += len(truth & flagged)
+        misses += len(truth - flagged)
+        false_alarms += len(flagged - truth)
+
+    assert false_alarms == 0, f"{false_alarms} honest channels flagged as fabricated"
+    assert hits / max(hits + misses, 1) >= 0.5, "the screen detects almost nothing"
+
+
+def test_the_screen_decides_on_chance_not_a_borrowed_constant() -> None:
+    """Nigrini's bands were calibrated on far larger datasets.
+
+    At the few hundred rows a monthly channel produces, sampling noise alone
+    lands near 0.010 and tips past the 0.015 band. Using the band as the test
+    produced 21 false alarms across 30 clean periods.
+    """
+    from taper.forensics import MAD_MARGINAL, null_threshold
+
+    small = null_threshold(200)
+    large = null_threshold(5000)
+    assert small > large, "chance must matter more at smaller sample sizes"
+    assert small > MAD_MARGINAL * 0.5, (
+        "noise at 200 rows is not far below the fixed band - which is the "
+        "entire reason the band cannot be used as the test"
+    )
+
+
+def test_forensic_flags_are_exceptions_never_findings() -> None:
+    """Benford says something about a population, never about a transaction.
+
+    Emitting per-row findings from a population statistic would be both wrong
+    and a direct precision loss.
+    """
+    for seed in (500, 501, 502):
+        case = generate(n_batches=60, seed=seed)
+        result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+        assert not [
+            f for f in result.findings
+            if f.defect_class.value == "fabricated_amounts"
+        ], "a population statistic was asserted about individual rows"
+
+
+def test_small_segments_are_not_judged() -> None:
+    """Benford on a handful of rows is confident noise."""
+    from taper.forensics import MIN_SAMPLE, profile
+
+    prof = profile([Money("500.00")] * 20, segment="tiny")
+    assert prof.n < MIN_SAMPLE
+    assert prof.verdict == "too few"
+    assert not prof.flagged

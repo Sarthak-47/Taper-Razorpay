@@ -510,6 +510,70 @@ def _rule_from_args(args) -> dict | None:
     return None
 
 
+def cmd_forensics(args) -> None:
+    """First-digit analysis: does this population look lived, or authored?"""
+    from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
+    from .models import TxnType
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    payments = [
+        r for r in case.bundle.settlement
+        if r.txn_type is TxnType.PAYMENT and r.gross_amount > 0
+    ]
+    profiles = profile_by_segment(payments, lambda r: r.method, lambda r: r.gross_amount)
+
+    print(BAR)
+    print(f"  FORENSICS - first-digit analysis  (seed {args.seed})")
+    print(BAR)
+    print("  Genuine amounts follow Benford's law: leading digit 1 about 30% of")
+    print("  the time, under 5% for 9. Invented figures cluster on round numbers")
+    print("  and favour middle digits. No model involved - this is a century-old")
+    print("  forensic-accounting test, and the right tool for the question.")
+
+    print(f"\n  {'segment':<14}{'rows':>7}{'MAD':>9}{'chance':>9}{'excess':>9}"
+          f"{'Nigrini':>14}{'verdict':>16}")
+    for prof in profiles:
+        excess = f"{prof.excess:.1f}x" if prof.null_mad else "-"
+        print(f"  {prof.segment:<14}{prof.n:>7}{prof.mad:>9.4f}"
+              f"{prof.null_mad:>9.4f}{excess:>9}{prof.band:>14}{prof.verdict:>16}")
+
+    flagged = [p for p in profiles if p.flagged]
+    # Show whatever is worth looking at: the flagged segment if there is one,
+    # otherwise the largest, which is the best evidence the data is honest.
+    testable = [p for p in profiles if p.n >= MIN_SAMPLE]
+    biggest = flagged[0] if flagged else (
+        max(testable, key=lambda p: p.n) if testable else None
+    )
+    if biggest:
+        print(f"\n  FIRST-DIGIT DISTRIBUTION - {biggest.segment} (n={biggest.n})")
+        print(f"  {'digit':<7}{'actual':>9}{'Benford':>10}   ")
+        for d in range(1, 10):
+            obs = biggest.observed.get(d, 0.0)
+            bar = "#" * int(obs * 120)
+            print(f"  {d:<7}{obs:>8.1%}{BENFORD[d]:>10.1%}   {bar}")
+
+    print(f"\n  {'-' * 68}")
+    if flagged:
+        for prof in flagged:
+            print(f"  FLAGGED: {prof.segment}")
+            print(f"    {_wrap(prof)}")
+    else:
+        print("  Nothing flagged. Every segment with enough rows sits within what")
+        print("  chance produces at its own sample size.")
+    print("\n  A flag is a screening signal, never proof. Price lists, fixed-fee")
+    print("  products and rounding policy all produce honest nonconformity. It")
+    print("  says look here - a human decides what it means.")
+    print(BAR)
+
+
+def _wrap(prof, width: int = 66) -> str:
+    import textwrap
+
+    from .forensics import describe
+
+    return ("\n    ").join(textwrap.wrap(describe(prof), width))
+
+
 def cmd_doctor(args) -> None:
     """Say what this machine can run, and exactly what to type next."""
     from .diagnose import run
@@ -918,6 +982,11 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--retire", nargs=2, metavar=("RULE_ID", "REASON"),
                     help="withdraw a rule that has stopped being true")
     rs.set_defaults(func=cmd_resolve)
+
+    fx = sub.add_parser("forensics", parents=[shared],
+                        help="first-digit analysis: lived amounts, or authored?")
+    fx.add_argument("--seed", type=int, default=500)
+    fx.set_defaults(func=cmd_forensics)
 
     doc = sub.add_parser("doctor", parents=[shared],
                          help="what this machine can run, and what to type next")

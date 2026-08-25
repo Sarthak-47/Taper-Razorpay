@@ -65,6 +65,16 @@ STALE_RULE_MIN_ROWS = 2
 # early about a sale that was always going to settle is a wasted investigation.
 SETTLEMENT_HORIZON = timedelta(days=7)
 
+# How much a fee may exceed the contracted amount before it is an overcharge
+# rather than rounding. Two paise covers the worst case of rounding fee and GST
+# independently; anything under it is arithmetic, not billing.
+FEE_ROUNDING_ALLOWANCE = Decimal("0.02")
+
+# Precision at which two implied rates count as the same price. A tenth of a
+# percent is finer than any real rate card and coarse enough to absorb the
+# paisa-level rounding that small amounts introduce.
+RATE_BUCKET = Decimal("0.001")
+
 
 # ---------------------------------------------------------------------------
 # Layer 0 - transaction-level arithmetic
@@ -106,7 +116,23 @@ def check_fees(
         over: list[tuple[SettlementRow, Decimal]] = []
         for row in rows:
             implied = (row.fee / row.gross_amount).quantize(Decimal("0.0001"))
-            if implied > expected_rate + Decimal("0.0005"):  # above rounding noise
+
+            # Two conditions, and the currency one is load-bearing.
+            #
+            # Rounding error is bounded in rupees, not in rate: a single paisa
+            # of unavoidable rounding on a Rs.15 payment is a 0.07% swing in
+            # implied rate, far past any sensible rate tolerance. Testing the
+            # rate alone therefore reports every small transaction as
+            # overcharged - which is exactly what happened once amounts became
+            # realistically log-distributed and reached down to tens of rupees.
+            #
+            # So a row must be over on the rate *and* over by more than
+            # rounding can explain in actual money.
+            expected_fee = (row.gross_amount * expected_rate).quantize(Money("0.01"))
+            if (
+                implied > expected_rate + Decimal("0.0005")
+                and row.fee - expected_fee > FEE_ROUNDING_ALLOWANCE
+            ):
                 over.append((row, implied))
 
         if not over:
@@ -121,8 +147,17 @@ def check_fees(
         # an overcharge is a minority of them. Requiring a majority keeps the
         # 45-of-50 international-card case systematic and correctly leaves
         # 3-of-161 domestic-card rows as the overcharges they are.
-        counts = Counter(implied for _, implied in over)
-        modal_rate, modal_n = counts.most_common(1)[0]
+        # Bucket the implied rates before looking for a mode. A rate card is
+        # uniform only to within rounding: on a Rs.35 payment the same
+        # contracted 3% lands at 0.0301, 0.0299 or 0.0298 depending on where
+        # the paisa falls. Grouping at full precision fragments one price into
+        # many, so no value reaches a majority and a legitimate rate card is
+        # reported as a pile of individual overcharges.
+        buckets = Counter(
+            implied.quantize(RATE_BUCKET) for _, implied in over
+        )
+        modal_bucket, modal_n = buckets.most_common(1)[0]
+        modal_rate = modal_bucket
         systematic = (
             modal_n >= SYSTEMATIC_RATE_MIN_ROWS
             and modal_n / len(rows) >= SYSTEMATIC_RATE_MIN_SHARE
@@ -149,7 +184,7 @@ def check_fees(
             )
 
         for row, implied in over:
-            if systematic and implied == modal_rate:
+            if systematic and implied.quantize(RATE_BUCKET) == modal_bucket:
                 continue  # covered by the rate-card question above
             charged = row.fee + row.gst_on_fee
             fair_fee = (row.gross_amount * expected_rate).quantize(Money("0.01"))
@@ -948,6 +983,44 @@ def check_rule_health(
     return exceptions
 
 
+def check_fabricated_amounts(bundle: SourceBundle) -> list[Exception_]:
+    """Screen each payment channel for amounts that look authored, not lived.
+
+    An exception rather than a finding, deliberately and permanently. Benford
+    conformance is evidence about a *population*, and no per-transaction claim
+    follows from it - flagging individual rows would be both wrong and, here,
+    a straight precision loss. It says look at this channel, and a human
+    decides whether a price list explains it or something else does.
+    """
+    from ..forensics import MIN_SAMPLE, describe, profile_by_segment
+
+    payments = [
+        r for r in bundle.settlement
+        if r.txn_type is TxnType.PAYMENT and r.gross_amount > 0
+    ]
+    if len(payments) < MIN_SAMPLE:
+        return []
+
+    exceptions: list[Exception_] = []
+    for prof in profile_by_segment(payments, lambda r: r.method, lambda r: r.gross_amount):
+        if not prof.flagged:
+            continue
+        exceptions.append(
+            Exception_(
+                subject_id=f"segment::{prof.segment}",
+                kind="fabricated_amounts",
+                context={
+                    "method": prof.segment,
+                    "rows": prof.n,
+                    "mad": f"{prof.mad:.4f}",
+                    "chi_square": f"{prof.chi_square:.1f}",
+                },
+                reason=describe(prof),
+            )
+        )
+    return exceptions
+
+
 def check_sources_present(bundle: SourceBundle) -> list[Exception_]:
     """Say when a source is missing, rather than reporting a clean close.
 
@@ -1019,4 +1092,5 @@ def run_deterministic(
     # it reads the matches the earlier layers produced.
     stale = check_rule_health(matches, bundle, store)
     missing = check_sources_present(bundle)
-    return matches, findings, missing + fee_exceptions + stale + exceptions
+    forensic = check_fabricated_amounts(bundle)
+    return matches, findings, missing + forensic + fee_exceptions + stale + exceptions
