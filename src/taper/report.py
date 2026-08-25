@@ -408,8 +408,10 @@ def cash_section(result: ReconResult, period: str) -> str:
     rows = []
     for title, lines in groups:
         for line in lines:
-            shown = (f"Rs.{line.amount:,.2f}" if line.amount
-                     else f"{line.count} batch(es)")
+            # A timing line has no amount by design - it moves *when* cash is
+            # available, not how much. Say so rather than restating the count,
+            # which the next column already carries.
+            shown = f"Rs.{line.amount:,.2f}" if line.amount else "no amount"
             rows.append(
                 f"<tr><td class='muted'>{_esc(title)}</td>"
                 f"<td>{_esc(line.label)}</td><td>{shown}</td>"
