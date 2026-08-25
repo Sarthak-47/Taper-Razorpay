@@ -35,9 +35,9 @@ python -m taper.cli campaign --months 6 --average-runs 8
 
 | | Month 1 | Month 6 |
 |---|---|---|
-| Model calls / 100 records | 1.11 | **0.61** *(−45%)* |
-| Clean match rate | 62.5% | **93.5%** |
-| Human reviews per close | 13.8 | **7.8** |
+| Model calls / 100 records | 1.12 | **0.50** *(−56%)* |
+| Clean match rate | 65.4% | **95.9%** |
+| Human reviews per close | 14.1 | **5.8** |
 | **Precision** | **1.000** | **1.000** |
 
 Four more things worth thirty seconds each:
@@ -45,8 +45,9 @@ Four more things worth thirty seconds each:
 | Command | What it shows |
 |---|---|
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
-| `taper risk` | Reviewing the riskiest 10% of batches catches **67%** of all escalations (6.7×) |
-| `taper risk --compare` | Why the shipped model has no dependencies — a measurement, not a preference |
+| `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
+| `taper forensics` | Benford first-digit analysis — does this population look **lived, or authored**? |
+| `taper risk --compare` | Why the shipped model has no dependencies — three measurements, not a preference |
 | `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
 | `taper resolve` | Teach the store what a human worked out — through the admission gate |
 | `taper doctor` | What this machine can run, and the exact command to type next |
@@ -61,7 +62,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**111 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**116 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -156,15 +157,15 @@ separates learning from month-to-month variance):
 
 | Month | Rules | Model calls / 100 records | Exceptions | Clean match rate | Precision | Recall |
 |---|---|---|---|---|---|---|
-| 1 | 2.9 | 1.11 | 13.8 | 62.5% | 1.000 | 0.900 |
-| 2 | 3.1 | **0.51** | **5.9** | 91.4% | 1.000 | 0.949 |
-| 3 | 3.4 | 0.53 | 6.2 | **96.7%** | 1.000 | 0.939 |
-| 4 | 3.8 | 0.52 | 6.0 | 95.9% | 1.000 | 0.941 |
-| 5 | 3.9 | 0.61 | 7.4 | 92.4% | 1.000 | 0.933 |
-| 6 | 3.9 | 0.61 | 7.8 | 93.5% | 1.000 | 0.932 |
+| 1 | 2.6 | 1.12 | 14.1 | 65.4% | 1.000 | 0.913 |
+| 2 | 3.1 | 0.74 | 8.9 | 88.2% | 1.000 | 0.917 |
+| 3 | 3.2 | 0.50 | 6.8 | 94.8% | 1.000 | 0.942 |
+| 4 | 3.5 | 0.54 | 6.9 | 94.5% | 1.000 | 0.939 |
+| 5 | 3.5 | 0.49 | 6.5 | 95.7% | 1.000 | 0.943 |
+| 6 | 3.8 | **0.50** | **5.8** | **95.9%** | 1.000 | 0.943 |
 
-**Model calls per 100 records fall 45%. Clean match rate goes 62.5% → 93.5%.
-Human reviews per close drop 13.8 → 7.8. Recall rises 0.900 → 0.932. Precision
+**Model calls per 100 records fall 56%. Clean match rate goes 65.4% → 95.9%.
+Human reviews per close drop 14.1 → 5.8. Recall rises 0.913 → 0.943. Precision
 stays at 1.000 the whole way.**
 
 Months 3–6 are the steady state; the learnable structure is absorbed by month 3
@@ -302,6 +303,56 @@ All four rule types learned, precision **1.000 in every month**, match rate
 it holds with a real model in the loop, on hardware anyone reviewing this
 already has.
 
+### Forensics — does this population look lived, or authored?
+
+Every other check asks whether a *transaction* is wrong. This one asks whether a
+*population* was lived or authored — a different question, and one answered by a
+technique forensic accountants have used for decades with no model involved.
+
+Genuine amounts follow **Benford's law**: leading digit 1 about 30% of the time,
+under 5% for 9. Invented figures do not — a person typing plausible totals
+reaches for 5,000 far more often than chance and almost never for 1,043.75.
+
+```bash
+python -m taper.cli forensics --seed 504
+```
+
+```
+segment          rows      MAD   chance   excess       Nigrini         verdict
+card              343   0.0584   0.0213     2.7x nonconformity   nonconformity
+upi               411   0.0152   0.0200     0.8x nonconformity   within chance
+
+FIRST-DIGIT DISTRIBUTION - card (n=343)
+1          4.7%     30.1%   #####
+4         19.0%      9.7%   ######################
+5         15.7%      7.9%   ##################
+```
+
+Leading 1 collapsed from 30% to 4.7% while 4 and 5 nearly doubled — the
+signature of amounts somebody wrote down. **Precision 1.00, recall 0.75, zero
+false alarms across thirty periods.**
+
+**Two rows in that table make the whole point.** `card` and `upi` are both
+"nonconformity" by Nigrini's published band. Only `card` is flagged, because at
+411 rows `upi`'s deviation is *within what chance produces at that sample size*.
+
+Nigrini's bands were calibrated on datasets of many thousands. At the few hundred
+rows a monthly channel actually produces, sampling noise alone lands near 0.010
+and tips past the 0.015 line — and using the band as the test gave **21 false
+alarms across 30 clean periods, precision 0.30.** So the threshold is derived
+instead: draw from Benford at the observed sample size and take the 99th
+percentile. Same data, same technique, precision 1.00.
+
+That threshold is computed once and scaled, not re-simulated — MAD shrinks as
+1/√n, and `threshold × √n` holds at 0.41 across a 32× range of sizes. Simulating
+per sample size made this check **93% of a close's runtime**; the asymptotic
+makes it O(1).
+
+**It emits exceptions, never findings, permanently.** Benford says something
+about a population and nothing about any row in it. Price lists, fixed-fee
+products and rounding policy all produce honest nonconformity — it says *look
+here*, and a human decides what it means.
+
 ### Red team — prompt injection through a bank narration
 
 A merchant's own customer can put text into a payment reference. It travels
@@ -391,12 +442,12 @@ AXIS reprices from ₹250 to ₹375 at month 4:
 
 | Month | Rules | Exceptions | Match rate | Event |
 |---|---|---|---|---|
-| 1 | 3 | 10 | 74.3% | |
-| 2 | 3 | **3** | 94.7% | steady state |
-| 3 | 3 | 3 | 94.7% | |
-| 4 | 4 | 9 | 78.4% | **← AXIS repriced** |
-| 5 | 4 | 5 | 91.9% | relearned |
-| 6 | 4 | 6 | 94.4% | |
+| 1 | 3 | 20 | 71.0% | |
+| 2 | 3 | 11 | 94.1% | |
+| 3 | 3 | **5** | **97.3%** | steady state |
+| 4 | 4 | 12 | 74.3% | **← AXIS repriced** |
+| 5 | 4 | 4 | 92.1% | relearned |
+| 6 | 4 | 6 | 97.3% | |
 
 ```
 ACTIVE    adjustment_pattern_003   amount=375.00, keyword=PROC CHG
@@ -429,17 +480,17 @@ Deterministic layers only, 40 batches (~1,300 records) per seed:
 
 | Seed | Records | Precision | Recall | Clean match rate |
 |---|---|---|---|---|
-| 7 | 1,270 | 1.000 | 0.860 | 74.2% |
-| **99** *(held out)* | 1,364 | **1.000** | **0.908** | 76.5% |
-| 1234 | 1,295 | 1.000 | 0.944 | 69.4% |
-| 2025 | 1,427 | 1.000 | 0.882 | 45.5% |
+| 7 | 1,414 | 1.000 | 0.847 | 66.7% |
+| **99** *(held out)* | 1,233 | **1.000** | **0.928** | 77.8% |
+| 1234 | 1,433 | 1.000 | 0.964 | 51.4% |
+| 2025 | 1,446 | 1.000 | 0.896 | 55.9% |
 
 These are month-one numbers with an **empty rule store** — the honest cold-start
 baseline. Match rate is low because roughly half the banks take a recurring
 charge nobody has explained yet. That is the gap the campaign above closes.
 
 Precision is 1.000 across every seed — **zero false positives**, enforced as a
-test rather than merely observed. Cold-start recall is 0.86–0.94; what it misses
+test rather than merely observed. Cold-start recall is 0.85–0.96; what it misses
 is not silently dropped but lands on the exception list with a stated reason, and
 recall climbs to 0.95 once the rule store fills.
 
@@ -468,49 +519,47 @@ Trained on seeds `[11..26]`, evaluated on `[901..912]` — **never fitted on**, 
 
 | Metric | Value |
 |---|---|
-| Brier score | **0.0899** |
-| Baseline (quote the base rate) | 0.1203 |
-| **Brier skill** | **+0.253** |
-| AUC | 0.817 |
+| Brier score | **0.0664** |
+| Baseline (quote the base rate) | 0.1125 |
+| **Brier skill** | **+0.410** |
+| AUC | 0.858 |
 
 The number that matters operationally is the review budget:
 
 | Review the riskiest… | Catch this share of escalations | Lift |
 |---|---|---|
-| **10% of batches** | **42%** | **4.2×** |
-| 20% | 60% | 3.0× |
-| 30% | 70% | 2.3× |
+| **10% of batches** | **56%** | **5.6×** |
+| 20% | 65% | 3.2× |
+| 30% | 73% | 2.4× |
 
 ```bash
 python -m taper.cli risk
 ```
 
-#### The backend choice was re-measured, and it flipped
+#### The backend choice was re-measured three times, and settled on cost
 
-Gradient boosting was the obvious first choice. Measured, it lost — a
-standardised logistic regression matched or beat it, so the shipped model
-needed no dependency at all.
+Gradient boosting was the obvious first choice. The comparison has now been
+re-run after every change to the data, and the lead changed each time:
 
-Then chargeback holds entered the data. Deductions began interacting with batch
-size in a way a linear model cannot express, and re-running the same comparison
-reversed the answer:
+| Data | Winner | Margin |
+|---|---|---|
+| original | logistic | AUC 0.914 vs 0.851 |
+| + chargeback holds | gradient boosting | skill +0.253 vs +0.166 |
+| + realistic amounts | split — GBM at 20 batches, logistic at 40 | small either way |
 
-| Backend | AUC | Brier | Skill |
-|---|---|---|---|
-| logistic (no deps) | 0.794 | 0.1003 | +0.166 |
-| **sklearn GradientBoosting** | **0.817** | **0.0899** | **+0.253** |
+**That pattern is the finding.** On a few hundred rows with a handful of strong
+features these two are equivalent, and the difference between them is noise.
+Chasing whichever led on the last measurement would be fitting the choice to the
+sample.
 
-So gradient boosting became the default. **That the comparison was re-run when
-the data changed matters more than which way it landed** — and it is why the
-command stayed in the CLI rather than being deleted once it had made its point:
+When two options repeatedly measure the same, the tiebreak is cost — and one of
+them costs a dependency. So the dependency-free logistic regression ships,
+scikit-learn stays an optional extra, and the comparison stays runnable so the
+next person can check rather than trust:
 
 ```bash
 python -m taper.cli risk --compare
 ```
-
-scikit-learn leads but is never *required*. With the import blocked the logistic
-model takes over, the whole pipeline still runs, and the evaluation names the
-backend it used instead of quietly degrading. A test asserts exactly that.
 
 Isotonic calibration is likewise hand-implemented — pool-adjacent-violators is
 about thirty lines, so the part carrying the guarantee is in the repo rather
@@ -542,12 +591,12 @@ that the engine fails the first way. This is the test of that bet:
 
 | Level | Ambiguity | Spacing | Precision | Recall | Match | Exceptions | False findings |
 |---|---|---|---|---|---|---|---|
-| baseline | 1.0× | 2 | **1.000** | 0.925 | 67.4% | 12 | **0** |
-| mild | 1.5× | 2 | **1.000** | 0.867 | 65.6% | 18 | **0** |
-| moderate | 2.5× | 1 | **1.000** | 0.790 | 71.9% | 35 | **0** |
-| heavy | 4.0× | 1 | **1.000** | 0.662 | 77.3% | 61 | **0** |
-| severe | 6.0× | 0 | **1.000** | 0.456 | 80.0% | 112 | **0** |
-| absurd | 6.6× | 0 | **1.000** | 0.414 | **0.0%** | 120 | **0** |
+| baseline | 1.0× | 2 | **1.000** | 0.885 | 61.7% | 17 | **0** |
+| mild | 1.5× | 2 | **1.000** | 0.847 | 71.7% | 21 | **0** |
+| moderate | 2.5× | 1 | **1.000** | 0.777 | 71.8% | 36 | **0** |
+| heavy | 4.0× | 1 | **1.000** | 0.678 | 86.2% | 55 | **0** |
+| severe | 6.0× | 0 | **1.000** | 0.441 | 66.7% | 117 | **0** |
+| absurd | 6.6× | 0 | **1.000** | 0.423 | **0.0%** | 121 | **0** |
 
 **Fail-safe across the entire ladder.** Precision never leaves 1.000 — zero
 false findings at any level. At the top rung the engine matches *nothing* and

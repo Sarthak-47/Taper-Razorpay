@@ -327,13 +327,13 @@ def cmd_risk(args) -> None:
             _, cr = train_and_evaluate(n_batches=args.batches, seed=args.seed, prefer=pref)
             print(f"  {cr.backend:<44}{cr.auc:>8.3f}{cr.brier_model:>10.4f}{cr.skill:>+9.3f}")
         print()
-        print("  This default has been re-measured twice and changed once.")
-        print("  Originally the logistic regression matched or beat gradient boosting,")
-        print("  so the shipped model needed no dependency. Then chargeback holds")
-        print("  entered the data, deductions began interacting with batch size in a")
-        print("  way a linear model cannot express, and re-measuring flipped the")
-        print("  answer. Gradient boosting is now the default; the logistic model")
-        print("  remains a real fallback, so everything still runs without sklearn.")
+        print("  Re-measured three times, once after each change to the data, and")
+        print("  the lead changed every time - logistic, then gradient boosting when")
+        print("  chargeback holds arrived, then split once amounts became realistic.")
+        print("  Every margin was small, which is the finding: on a few hundred rows")
+        print("  with a handful of strong features these two are equivalent, and the")
+        print("  difference between them is noise. Equivalent options are separated")
+        print("  by cost, so the dependency-free one ships.")
         print(BAR)
         return
 
@@ -962,7 +962,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rk = sub.add_parser("risk", parents=[shared], help="train/evaluate the exception-risk model")
     rk.add_argument("--seed", type=int, default=0)
-    rk.add_argument("--backend", choices=("auto", "logistic", "gbm"), default="auto")
+    rk.add_argument("--backend", choices=("logistic", "gbm"), default="logistic")
     rk.add_argument("--compare", action="store_true",
                     help="benchmark both backends and print the comparison")
     rk.set_defaults(func=cmd_risk)

@@ -14,9 +14,9 @@ regression via pool-adjacent-violators is about thirty lines, so the part
 carrying the guarantee is here rather than imported, and a logistic regression
 trained by gradient descent keeps everything runnable without scikit-learn.
 
-Which model *leads* has changed once, on measurement rather than taste - see
-``_make_model``. That the choice was re-run when the data changed matters more
-than which way it landed.
+Which model leads has changed three times, once per change to the data - see
+``_make_model``. That the comparison was re-run each time matters more than any
+single result, and the pattern across all three is that the two are equivalent.
 """
 
 from __future__ import annotations
@@ -98,10 +98,9 @@ class IsotonicCalibrator:
 class LogisticModel:
     """Plain logistic regression by gradient descent, with L2 and standardisation.
 
-    Led the comparison until chargeback holds entered the data and the signal
-    stopped being close to linear; gradient boosting leads now. Kept as a real
-    fallback rather than a relic - without scikit-learn the whole pipeline still
-    runs, and the evaluation names the backend instead of quietly degrading.
+    The shipped model, chosen on a tiebreak: measured three times against
+    gradient boosting, the lead changed each time and every margin was small.
+    Equivalent options are separated by cost, and this one costs no dependency.
     See ``taper risk --compare``.
     """
 
@@ -182,7 +181,8 @@ class ExceptionRiskModel:
     _sklearn: bool = False
 
     def fit(
-        self, X: list[list[float]], y: list[int], seed: int = 0, prefer: str = "auto"
+        self, X: list[list[float]], y: list[int], seed: int = 0,
+        prefer: str = "logistic",
     ) -> ExceptionRiskModel:
         """Fit the model, then fit the calibrator on a *disjoint* split.
 
@@ -235,31 +235,32 @@ class ExceptionRiskModel:
         return self.model.importances()
 
 
-def _make_model(seed: int, prefer: str = "auto") -> tuple[object, bool]:
-    """Build the underlying model, preferring gradient boosting where available.
+def _make_model(seed: int, prefer: str = "logistic") -> tuple[object, bool]:
+    """Build the underlying model. Logistic ships, on a tiebreak rather than a win.
 
-    This default has been re-measured twice and changed once, which is the
-    point of keeping ``taper risk --compare`` runnable.
+    This comparison has now been re-run three times, once after each change to
+    the data, and the lead changed every time:
 
-    First measurement: a standardised logistic regression matched or beat
-    gradient boosting, so the shipped model needed no dependency. Then
-    chargeback holds entered the data and the signal stopped being close to
-    linear - deductions interact with batch size in a way a linear model cannot
-    express. Re-measured, gradient boosting now wins clearly on calibration
-    (Brier skill +0.253 against +0.166), so it became the default.
+      * originally           logistic ahead
+      * with chargeback holds  gradient boosting ahead (skill +0.253 / +0.166)
+      * with realistic amounts  split - GBM at 20 batches, logistic at 40
 
-    The logistic model stays as a genuine fallback rather than a relic: without
-    scikit-learn installed everything still runs, and the evaluation reports
-    which backend produced the numbers instead of quietly degrading.
+    The margins are small in every direction, which is the actual finding: on a
+    few hundred rows with a handful of strong features, the two are equivalent
+    and the difference between them is noise, not signal. Chasing whichever led
+    on the last measurement would be fitting the choice to the sample.
+
+    When two options repeatedly measure the same, the tiebreak is cost - and one
+    of them costs a dependency. So the dependency-free model ships, scikit-learn
+    stays an optional extra, and ``taper risk --compare`` keeps the comparison
+    reproducible so the next person can check rather than trust.
     """
     if prefer in ("gbm", "auto"):
         try:
             from sklearn.ensemble import GradientBoostingClassifier
         except ImportError:
-            if prefer == "gbm":
-                # Explicitly asked for, not available. Say so through the
-                # backend name rather than silently substituting.
-                return LogisticModel(), False
+            # Asked for and not available. The fallback is named in the report
+            # rather than silently substituted.
             return LogisticModel(), False
         return (
             GradientBoostingClassifier(
