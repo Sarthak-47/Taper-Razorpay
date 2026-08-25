@@ -42,6 +42,9 @@ jobs:
 
       # The pipeline must stay runnable with no API key. If these break, a
       # reviewer cloning the repo cannot reproduce a single number in the README.
+      - name: Smoke - cash position
+        run: python -m taper.cli --no-llm cash --seed 99
+
       - name: Smoke - forensics
         run: python -m taper.cli forensics --seed 504 --batches 60
 

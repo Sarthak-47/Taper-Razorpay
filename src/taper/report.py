@@ -380,6 +380,60 @@ DEFECT_MEANING: dict[DefectClass, tuple[str, str]] = {
 }
 
 
+def cash_section(result: ReconResult, period: str) -> str:
+    """The position, above everything else - it is what gets read first."""
+    from .cashflow import assemble
+
+    pos = assemble(result, period)
+    p: list[str] = []
+
+    p.append(
+        "<div class='kpis'>"
+        f"<div class='kpi'><div class='v'>Rs.{pos.in_bank:,.0f}</div>"
+        f"<div class='l'>in the bank</div></div>"
+        f"<div class='kpi'><div class='v good'>+Rs.{pos.owed_to_us:,.0f}</div>"
+        f"<div class='l'>owed to the merchant</div></div>"
+        f"<div class='kpi'><div class='v bad'>-Rs.{pos.owed_by_us:,.0f}</div>"
+        f"<div class='l'>owed by the merchant</div></div>"
+        f"<div class='kpi'><div class='v'>Rs.{pos.net_position:,.0f}</div>"
+        f"<div class='l'>net position</div></div>"
+        "</div>"
+    )
+
+    groups = [
+        ("Real money, not in the balance", pos.not_arriving),
+        ("Owed to the merchant", pos.claims_in),
+        ("Owed by the merchant", pos.claims_out),
+    ]
+    rows = []
+    for title, lines in groups:
+        for line in lines:
+            shown = (f"Rs.{line.amount:,.2f}" if line.amount
+                     else f"{line.count} batch(es)")
+            rows.append(
+                f"<tr><td class='muted'>{_esc(title)}</td>"
+                f"<td>{_esc(line.label)}</td><td>{shown}</td>"
+                f"<td>{line.count}</td>"
+                f"<td class='muted'>{_esc(line.note)}</td></tr>"
+            )
+    if rows:
+        p.append(
+            "<table><thead><tr><th>Group</th><th>Line</th><th>Amount</th>"
+            "<th>Count</th><th>What it means</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table>"
+        )
+
+    if pos.withheld_total:
+        p.append(
+            f"<p><strong>Excluded on purpose:</strong> Rs.{pos.withheld_total:,.2f} "
+            f"withheld against disputes. Not the merchant's to count until they "
+            f"resolve - adding it would overstate the position in the direction "
+            f"that causes an overdraft.</p>"
+        )
+    p.append(f"<p class='muted'>{_esc(pos.confidence_note)}</p>")
+    return "".join(p)
+
+
 def money_bars(rows: list[tuple[Any, int, Any]], width: int = 760) -> str:
     """Horizontal bars for the money breakdown.
 
@@ -639,6 +693,7 @@ def render(
 
     p.append(
         "<nav class='toc'>"
+        "<a href='#cash'>Cash position</a>"
         "<a href='#money'>Money found</a>"
         "<a href='#taper'>The taper</a>"
         "<a href='#learned'>What it learned</a>"
@@ -651,6 +706,11 @@ def render(
     )
 
     # --- money, broken down and made actionable ---------------------------
+    # First, because it is the question a controller asks before any other:
+    # reconciliation says whether the books agree, this says what they have.
+    p.append("<h2 id='cash'>Cash position</h2>")
+    p.append(cash_section(result, period))
+
     p.append("<h2 id='money'>Money found</h2>")
     p.append(money_section(result))
 

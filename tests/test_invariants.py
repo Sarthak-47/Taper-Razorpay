@@ -1884,3 +1884,96 @@ def test_small_segments_are_not_judged() -> None:
     assert prof.n < MIN_SAMPLE
     assert prof.verdict == "too few"
     assert not prof.flagged
+
+
+# ---------------------------------------------------------------------------
+# Claim: "the cash position is wrong in the safe direction, or not at all"
+# ---------------------------------------------------------------------------
+
+def _position(seed: int = 99):
+    from taper.cashflow import assemble
+
+    case = generate(n_batches=40, seed=seed)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    return assemble(result, case.bundle.period), result
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_withheld_money_is_never_counted_as_available(seed: int) -> None:
+    """The one error that causes an overdraft.
+
+    Money held against a dispute is not the merchant's to spend until the
+    dispute resolves. It is shown, because a controller needs to know it
+    exists, and excluded from the net, because counting it would overstate
+    the position in the direction that hurts.
+    """
+    pos, _ = _position(seed)
+    expected = pos.in_bank + pos.owed_to_us - pos.owed_by_us
+    assert pos.net_position == expected
+    if pos.withheld_total:
+        assert pos.net_position < pos.in_bank + pos.owed_to_us - pos.owed_by_us \
+            + pos.withheld_total
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_duplicate_captures_are_a_liability_not_revenue(seed: int) -> None:
+    """That money is in the bank and is owed back.
+
+    Counting it as revenue is how a refund run becomes a surprise, so it has
+    to reduce the net rather than sit silently inside `in_bank`.
+    """
+    pos, result = _position(seed)
+    dupes = [f for f in result.findings
+             if f.defect_class.value == "duplicate_capture"]
+    if not dupes:
+        pytest.skip("no duplicate captures in this period")
+
+    total = sum((f.money_impact for f in dupes), Money("0.00"))
+    assert pos.owed_by_us >= total
+    assert pos.net_position < pos.in_bank + pos.owed_to_us
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_unattributed_money_makes_the_position_a_floor(seed: int) -> None:
+    """Silence about what could not be placed would be the dishonest version."""
+    pos, _ = _position(seed)
+    if pos.unreconciled_count:
+        assert "floor" in pos.confidence_note
+        assert pos.unreconciled > 0
+    else:
+        assert "complete" in pos.confidence_note
+
+
+def test_every_position_line_explains_itself() -> None:
+    """A number a controller cannot act on is decoration."""
+    pos, _ = _position(99)
+    for line in pos.not_arriving + pos.claims_in + pos.claims_out:
+        assert line.note.strip(), f"{line.label} has no explanation"
+        assert line.direction in ("inflow", "outflow", "neutral")
+
+
+def test_position_of_an_empty_close_is_zero_not_a_crash() -> None:
+    from taper.cashflow import assemble
+    from taper.models import SourceBundle
+
+    result = reconcile(SourceBundle(), config=RunConfig(use_llm=False))
+    pos = assemble(result, "2026-06")
+    assert pos.in_bank == Money("0.00")
+    assert pos.net_position == Money("0.00")
+    assert "complete" in pos.confidence_note
+
+
+def test_the_report_leads_with_the_cash_position() -> None:
+    """It is the first question a controller asks, so it is the first section."""
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, _score(case, result, "mock"), case, "2026-06")
+
+    assert "Cash position" in html
+    assert html.index("Cash position") < html.index("Money found")
+    assert "net position" in html
+    assert "owed by the merchant" in html

@@ -510,6 +510,69 @@ def _rule_from_args(args) -> dict | None:
     return None
 
 
+def cmd_cash(args) -> None:
+    """The cash position: how much money is actually there."""
+    from .cashflow import assemble
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    cfg, client_name = _client_and_config(args)
+    _warn_mock(args)
+    result = reconcile(case.bundle, config=cfg)
+    pos = assemble(result, case.bundle.period)
+
+    print(BAR)
+    print(f"  CASH POSITION - period {pos.period}  (seed {args.seed})")
+    print(BAR)
+    print("  Reconciliation asks whether the books agree. This asks what the")
+    print("  merchant actually has, which is a different number.")
+
+    print(f"\n  IN THE BANK{'':<28}Rs.{pos.in_bank:>16,.2f}")
+    print(f"    across {pos.matched_batches} matched batch(es)")
+
+    if pos.not_arriving:
+        print(f"\n  {'-' * 68}")
+        print("  REAL MONEY, NOT IN THE BALANCE")
+        print(f"  {'-' * 68}")
+        for line in pos.not_arriving:
+            shown = f"Rs.{line.amount:,.2f}" if line.amount else f"{line.count} batch(es)"
+            print(f"  {line.label:<38}{shown:>20}")
+            print(f"    {line.note}")
+
+    if pos.claims_in:
+        print(f"\n  {'-' * 68}")
+        print("  OWED TO THE MERCHANT")
+        print(f"  {'-' * 68}")
+        for line in pos.claims_in:
+            print(f"  {line.label:<38}Rs.{line.amount:>16,.2f}  ({line.count})")
+            print(f"    {line.note}")
+
+    if pos.claims_out:
+        print(f"\n  {'-' * 68}")
+        print("  OWED BY THE MERCHANT")
+        print(f"  {'-' * 68}")
+        for line in pos.claims_out:
+            print(f"  {line.label:<38}Rs.{line.amount:>16,.2f}  ({line.count})")
+            print(f"    {line.note}")
+
+    print(f"\n  {'-' * 68}")
+    print("  NET POSITION")
+    print(f"  {'-' * 68}")
+    print(f"  {'in the bank':<38}Rs.{pos.in_bank:>16,.2f}")
+    print(f"  {'plus owed to the merchant':<38}Rs.{pos.owed_to_us:>16,.2f}")
+    print(f"  {'less owed by the merchant':<38}Rs.{pos.owed_by_us:>16,.2f}")
+    print(f"  {'':<38}{'-' * 20:>20}")
+    print(f"  {'NET':<38}Rs.{pos.net_position:>16,.2f}")
+
+    if pos.withheld_total:
+        print(f"\n  Excluded on purpose: Rs.{pos.withheld_total:,.2f} withheld against")
+        print("  disputes. Not the merchant's to count until they resolve, and")
+        print("  adding it would overstate the position in the direction that")
+        print("  causes an overdraft.")
+
+    print(f"\n  {pos.confidence_note}")
+    print(BAR)
+
+
 def cmd_forensics(args) -> None:
     """First-digit analysis: does this population look lived, or authored?"""
     from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
@@ -982,6 +1045,11 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--retire", nargs=2, metavar=("RULE_ID", "REASON"),
                     help="withdraw a rule that has stopped being true")
     rs.set_defaults(func=cmd_resolve)
+
+    ca = sub.add_parser("cash", parents=[shared],
+                        help="the cash position: how much money is actually there")
+    ca.add_argument("--seed", type=int, default=99)
+    ca.set_defaults(func=cmd_cash)
 
     fx = sub.add_parser("forensics", parents=[shared],
                         help="first-digit analysis: lived amounts, or authored?")
