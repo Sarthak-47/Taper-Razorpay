@@ -44,6 +44,7 @@ Four more things worth thirty seconds each:
 
 | Command | What it shows |
 |---|---|
+| `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
 | `taper forensics` | Benford first-digit analysis — does this population look **lived, or authored**? |
@@ -55,6 +56,43 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+
+---
+
+## The cash position
+
+The track is titled *run the books **and the cash position***. Those are two
+different questions, and the second one is the one a CFO asks first.
+Reconciliation says whether the books agree. It does not say how much money is
+actually there — money can be settled and still not arrive, arrive and still be
+owed back, or be deducted for a reason nobody has explained.
+
+`taper cash` assembles that number out of findings the engine already produces.
+No new detection; new arithmetic, with two decisions in it.
+
+```
+In the bank                                Rs.14,394,848.01   (36 batches)
+Withheld pending disputes                  Rs.    49,599.73   shown, not added
+Owed to the merchant                       Rs.   627,955.92
+Owed by the merchant                       Rs. 1,333,451.73
+--------------------------------------------------------------------------
+Net position                               Rs.13,689,352.20
+```
+
+**Withheld money is shown and never added.** It is not the merchant's to count
+until the dispute resolves. Including it would overstate the position in exactly
+the direction that causes an overdraft.
+
+**Duplicate captures are a liability even though the cash is in the bank**,
+because it is owed back. A finding can legitimately sit on both sides of a
+position, labelled — that is what is true of it. Counting it as revenue is how a
+refund run becomes a surprise.
+
+Anything that could not be attributed to a batch is named alongside the total,
+and the position is stated as a *floor* rather than a total. The report leads
+with this section, ahead of reconciliation, because that is the reading order.
+
+---
 
 **Where to look in the code:** [`matching.py`](src/taper/engine/matching.py) is
 the deterministic core and its design rule; [`rules.py`](src/taper/engine/rules.py)
