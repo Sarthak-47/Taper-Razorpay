@@ -812,6 +812,31 @@ def cmd_ingest(args) -> None:
     _warn_mock(args)
 
     ledger = Path(args.ledger) if args.ledger else None
+
+    # A mistyped path is the most likely way anyone first meets this command,
+    # and it used to answer with a FileNotFoundError traceback. A tool whose
+    # entire argument is that it reports carefully should not open by dumping
+    # a stack trace at the reader.
+    missing = [
+        f"--{flag} {path}"
+        for flag, path in (("settlement", Path(args.settlement)),
+                           ("bank", Path(args.bank)),
+                           ("ledger", ledger))
+        if path is not None and not path.is_file()
+    ]
+    if missing:
+        print(BAR)
+        print("  INGEST - cannot start")
+        print(BAR)
+        for item in missing:
+            print(f"  no such file: {item}")
+        print("\n  Nothing was read. If you want a period to try this on:")
+        print("    python -m taper.cli ingest \\")
+        print("        --settlement data/sample/settlement.csv \\")
+        print("        --bank data/sample/bank.csv --ledger data/sample/ledger.csv")
+        print(BAR)
+        raise SystemExit(2)
+
     bundle, reports = load_bundle(Path(args.settlement), Path(args.bank), ledger)
 
     print(BAR)

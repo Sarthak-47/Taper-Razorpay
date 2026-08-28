@@ -2157,3 +2157,19 @@ def test_the_clean_flag_reaches_the_report_and_prints_no_score(capsys) -> None:
     assert "AUTO-CLEAR OPERATING POINT" not in out, (
         "offered a triage threshold for an empty queue"
     )
+
+
+def test_a_mistyped_path_is_a_message_not_a_traceback() -> None:
+    """The most likely first contact with `ingest` is a wrong path.
+
+    It used to answer with a FileNotFoundError stack trace, which is a poor
+    opening for a tool whose whole argument is that it reports carefully. The
+    exit code matters too: CI and shell pipelines read it.
+    """
+    from taper.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--no-llm", "ingest",
+              "--settlement", str(SAMPLE / "does-not-exist.csv"),
+              "--bank", str(SAMPLE / "bank.csv")])
+    assert excinfo.value.code == 2
