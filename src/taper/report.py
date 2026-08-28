@@ -285,6 +285,7 @@ tr.total td{font-weight:600;border-top:2px solid var(--ink)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
 .good{color:var(--good);font-weight:600} .bad{color:var(--bad);font-weight:600}
 .muted{color:var(--muted)}
+.small{font-size:12px;margin-top:3px}
 .banner{background:var(--warn-bg);border-left:3px solid var(--accent);
  padding:13px 16px;margin:22px 0;font-size:14px}
 .banner.warn{background:var(--err-bg);border-left-color:var(--bad)}
@@ -532,10 +533,14 @@ def learned_section(store) -> str:
     p = ["<table><thead><tr><th>Rule</th><th>Kind</th><th>What it encodes</th>"
          "<th>Learned from</th><th>On</th></tr></thead><tbody>"]
     for r in store.rules:
+        # The sentence first, the parameters under it. A reader checking whether
+        # the store learned anything sensible should not have to reconstruct
+        # "international cards are billed at 3%" out of two key=value pairs.
         params = ", ".join(f"{k}={v}" for k, v in sorted(r.params.items()) if v not in (None, ""))
         p.append(
             f"<tr><td class='mono'>{_esc(r.rule_id)}</td><td>{_esc(r.kind)}</td>"
-            f"<td class='mono'>{_esc(params)}</td>"
+            f"<td>{_esc(r.summary())}"
+            f"<div class='mono muted small'>{_esc(params)}</div></td>"
             f"<td class='mono muted'>{_esc(r.origin_exception)}</td>"
             f"<td class='muted'>{_esc(r.learned_on)}</td></tr>"
         )

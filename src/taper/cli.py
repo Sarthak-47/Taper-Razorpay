@@ -166,7 +166,7 @@ def cmd_reconcile(args) -> None:
         print(f"  {'-' * 68}")
         for exc in result.exceptions[: args.max_exceptions]:
             print(f"  [{exc.kind}] {exc.subject_id}")
-            print(f"      {exc.reason}")
+            print(_wrapped(exc.reason))
         if len(result.exceptions) > args.max_exceptions:
             print(f"      ... and {len(result.exceptions) - args.max_exceptions} more")
 
@@ -292,8 +292,8 @@ def cmd_campaign(args) -> None:
     if run.store and len(run.store):
         for r in run.store.rules:
             amt = r.params.get("amount")
-            detail = f"{r.params.get('keyword', '')} -> {r.params.get('category', '')}"
-            print(f"    {r.rule_id:<26}{detail:<44}{'Rs.' + str(amt) if amt else ''}")
+            print(f"    {r.rule_id:<26}{r.summary():<44}"
+                  f"{'Rs.' + str(amt) if amt else ''}")
     else:
         print("    none admitted")
     if run.store and run.store.rejected:

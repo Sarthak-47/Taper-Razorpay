@@ -263,7 +263,7 @@ class CampaignResult:
             f"Across {len(self.months)} closes the rule store grew to "
             f"{b.rules_after} rule(s). Model calls per 100 records fell "
             f"{a.card.llm_calls_per_100:.2f} -> {b.card.llm_calls_per_100:.2f} "
-            f"({call_drop:+.2f}), exceptions {a.exceptions} -> {b.exceptions} "
+            f"({-call_drop:+.2f}), exceptions {a.exceptions} -> {b.exceptions} "
             f"({-exc_drop:+d}), clean match rate {a.card.match_rate:.1%} -> "
             f"{b.card.match_rate:.1%} ({match_gain:+.1%})."
         )

@@ -2173,3 +2173,30 @@ def test_a_mistyped_path_is_a_message_not_a_traceback() -> None:
               "--settlement", str(SAMPLE / "does-not-exist.csv"),
               "--bank", str(SAMPLE / "bank.csv")])
     assert excinfo.value.code == 2
+
+
+def test_every_rule_kind_can_describe_itself() -> None:
+    """The campaign's rule list is the evidence that learning happened.
+
+    It used to read the keyword/category pair that only adjustment_pattern
+    carries, so a learned rate card and a learned narration alias both printed
+    as an empty arrow - the two kinds hardest to believe were learned were the
+    two the output could not show.
+    """
+    kinds = {
+        "bank_timing": {"bank": "SBI", "offset_days": 3},
+        "narration_alias": {"marker": "REF", "prefix": "UTR"},
+        "fee_variant": {"method": "intl_card", "rate": "0.03"},
+        "adjustment_pattern": {"keyword": "SVC CHG", "category": "bank_recurring_charge"},
+    }
+    for kind, params in kinds.items():
+        rule = Rule(rule_id=f"{kind}_001", kind=kind, params=params,
+                    origin_exception="x", learned_on="2026-06")
+        text = rule.summary()
+        assert text.strip(), f"{kind} described itself with nothing"
+        assert "?" not in text, f"{kind} could not read its own params: {text}"
+
+    assert "3.00%" in Rule(
+        rule_id="r", kind="fee_variant", params={"method": "intl_card", "rate": "0.03"},
+        origin_exception="x", learned_on="2026-06",
+    ).summary(), "a rate card should read as a percentage, not a raw decimal"

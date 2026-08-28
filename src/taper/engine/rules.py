@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -98,6 +99,32 @@ class Rule:
                 context.get("narration", "")
             ).upper()
         return False
+
+    def summary(self) -> str:
+        """One line naming what this rule asserts, for a human reading a list.
+
+        Every kind carries different params, so a single template cannot
+        describe them. The campaign's rule list used to read the
+        ``keyword``/``category`` pair that only ``adjustment_pattern`` has,
+        which meant a learned rate card and a learned narration alias both
+        printed as an empty arrow - the two kinds hardest to believe were
+        learned were the two the output could not show.
+        """
+        p = self.params
+        if self.kind == "bank_timing":
+            return f"{p.get('bank', '?')} settles T+{p.get('offset_days', '?')}"
+        if self.kind == "narration_alias":
+            marker = p.get("marker") or p.get("prefix") or "?"
+            return f"reference follows '{marker}'"
+        if self.kind == "fee_variant":
+            try:
+                rate = f"{Decimal(str(p['rate'])):.2%}"
+            except (ArithmeticError, KeyError, ValueError):
+                rate = str(p.get("rate", "?"))
+            return f"{p.get('method', '?')} is billed at {rate}"
+        if self.kind == "adjustment_pattern":
+            return f"{p.get('keyword', '?')} -> {p.get('category', '?')}"
+        return self.kind
 
     def verdict(self, context: dict[str, Any]) -> dict[str, Any]:
         """What this rule concludes. Pure - no side effects, no I/O."""

@@ -141,7 +141,7 @@ is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
 overrules it.
 
-**116 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**141 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -867,12 +867,16 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: 30 tests green, five CLI commands, no API key required.
+Running end-to-end: **141 tests green, 16 CLI commands**, no API key required.
 
-All four layers are wired, and three of the four rule types learn end to end
-(`adjustment_pattern`, `narration_alias`, `bank_timing`). Combined defects — a
-batch both split across credits *and* short by a recurring charge — now resolve
+All four layers are wired, and **all four rule types now learn end to end** —
+`adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
+last being the rate card the settlement report never states. Combined defects —
+a batch both split across credits *and* short by a recurring charge — resolve
 deterministically via candidate-target subset netting.
+
+The negative control is green: on a period where nothing is wrong, it finds
+nothing, escalates nothing and calls no model.
 
 Layer 3 has been validated against a **real model** — a local qwen2.5 via
 Ollama — for a single close, the ablation, and a full six-month campaign. The
