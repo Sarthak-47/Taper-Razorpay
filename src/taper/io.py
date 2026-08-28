@@ -241,7 +241,7 @@ def write_bundle(bundle: SourceBundle, out_dir: Path) -> dict[str, Path]:
     }
 
     with paths["settlement"].open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
+        w = csv.writer(fh, lineterminator="\n")
         w.writerow(["txn_id", "settlement_batch_id", "utr", "txn_type", "gross_amount",
                     "fee", "gst_on_fee", "settled_on", "order_id", "method"])
         for r in bundle.settlement:
@@ -250,14 +250,14 @@ def write_bundle(bundle: SourceBundle, out_dir: Path) -> dict[str, Path]:
                         r.order_id or "", r.method])
 
     with paths["bank"].open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
+        w = csv.writer(fh, lineterminator="\n")
         w.writerow(["bank_txn_id", "credit_amount", "value_date", "narration", "utr"])
         for c in bundle.bank:
             w.writerow([c.bank_txn_id, c.credit_amount, c.value_date, c.narration,
                         c.utr or ""])
 
     with paths["ledger"].open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
+        w = csv.writer(fh, lineterminator="\n")
         w.writerow(["order_id", "txn_id", "gross_amount", "created_at", "status"])
         for e in bundle.ledger:
             w.writerow([e.order_id, e.txn_id, e.amount, e.created_at, e.status])

@@ -72,6 +72,13 @@ jobs:
       - name: Smoke - prompt-injection red team
         run: python -m taper.cli --mock redteam --batches 20
 
+      # Runs the exact command the README gives a reader, against the exact
+      # files a clone carries. The round-trip step below cannot catch a missing
+      # fixture, because it generates its own.
+      - name: Smoke - the README's ingest command, on the committed fixture
+        run: |
+          python -m taper.cli --no-llm ingest             --settlement data/sample/settlement.csv             --bank data/sample/bank.csv --ledger data/sample/ledger.csv
+
       - name: Smoke - CSV round trip
         run: |
           python -m taper.cli --no-llm export --seed 99 --batches 20 --out data/ci

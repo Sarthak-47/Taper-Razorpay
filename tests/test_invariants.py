@@ -9,6 +9,7 @@ Run: python -m pytest tests/ -v
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -1977,3 +1978,64 @@ def test_the_report_leads_with_the_cash_position() -> None:
     assert html.index("Cash position") < html.index("Money found")
     assert "net position" in html
     assert "owed by the merchant" in html
+
+
+# --------------------------------------------------------------------------
+# The shipped fixture
+#
+# The README's headline "try it on real CSVs" command points at data/sample/.
+# Those files were gitignored for most of this project's life, so the command
+# worked for everyone who had run the generator and failed for everyone who had
+# only cloned the repo - the worst possible split, because it is invisible to
+# the person who wrote it. These tests fail on a checkout that does not carry
+# the fixture.
+# --------------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+SAMPLE = REPO / "data" / "sample"
+
+
+def test_the_sample_fixture_is_actually_in_the_repository() -> None:
+    for name in ("settlement.csv", "bank.csv", "ledger.csv"):
+        assert (SAMPLE / name).is_file(), (
+            f"data/sample/{name} is missing - the README tells a reader to "
+            "reconcile it, so a clone without it ships a broken first command"
+        )
+
+
+def test_the_sample_fixture_reconciles() -> None:
+    from taper.io import load_bundle
+
+    bundle, reports = load_bundle(
+        settlement=SAMPLE / "settlement.csv",
+        bank=SAMPLE / "bank.csv",
+        ledger=SAMPLE / "ledger.csv",
+    )
+    for source, report in reports.items():
+        assert report.ok, f"{source}: {report.errors[:3]}"
+        assert report.loaded, f"{source} loaded no rows"
+    result = reconcile(bundle, config=RunConfig(use_llm=False))
+    assert result.matches, "the shipped fixture matched nothing"
+
+
+def test_the_documented_seed_reproduces_the_fixture_byte_for_byte() -> None:
+    """data/sample/README.md names the command that wrote these files.
+
+    If that claim drifts - a generator tweak, a CSV dialect change - the fixture
+    silently stops being reproducible and the provenance note becomes a lie.
+    """
+    import shutil
+
+    from taper.io import write_bundle
+
+    out = REPO / "data" / ".roundtrip"
+    shutil.rmtree(out, ignore_errors=True)
+    try:
+        write_bundle(generate(n_batches=25, seed=7).bundle, out)
+        for name in ("settlement.csv", "bank.csv", "ledger.csv"):
+            assert (out / name).read_bytes() == (SAMPLE / name).read_bytes(), (
+                f"{name} no longer matches seed 7 - regenerate data/sample/ or "
+                "correct the command recorded in its README"
+            )
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

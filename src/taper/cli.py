@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from pathlib import Path
 
 from .engine.llm import MODEL
@@ -708,6 +709,20 @@ def cmd_bench(args) -> None:
     print(BAR)
 
 
+def _wrapped(text: str, width: int = 70, indent: str = "      ") -> str:
+    """Wrap an exception's reason instead of cutting it off mid-word.
+
+    These lines carry the argument for why something needs a human. Truncating
+    at a fixed 140 characters removed the part that said what to do about it,
+    which is the half worth reading.
+    """
+    return "\n".join(
+        textwrap.wrap(
+            text, width=width, initial_indent=indent, subsequent_indent=indent
+        )
+    )
+
+
 def cmd_export(args) -> None:
     """Write a generated period out as CSV, so the expected shape is concrete."""
     from .io import write_bundle
@@ -778,7 +793,7 @@ def cmd_ingest(args) -> None:
         print(f"  {'-' * 68}")
         for exc in result.exceptions[: args.max_exceptions]:
             print(f"  [{exc.kind}] {exc.subject_id}")
-            print(f"      {exc.reason[:140]}")
+            print(_wrapped(exc.reason))
     print(BAR)
 
 

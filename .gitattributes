@@ -1,6 +1,4 @@
-# Normalise line endings so the repo is identical on Windows, macOS and Linux CI.
-* text=auto eol=lf
-
-*.png binary
-*.jpg binary
-*.pdf binary
+# Exported fixtures must survive a round trip on any platform. taper writes CSV
+# with LF regardless of host; git must not helpfully convert it back, or the
+# same seed would stop reproducing the same bytes on a Windows checkout.
+*.csv text eol=lf
