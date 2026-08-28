@@ -651,6 +651,70 @@ def _kpi(value: str, label: str) -> str:
     return f'<div class="kpi"><div class="v">{value}</div><div class="l">{_esc(label)}</div></div>'
 
 
+def materiality_section(result) -> str:
+    """What the close asks a person to do, once size is taken into account."""
+    from .materiality import assess
+
+    report = assess(result)
+    if not report.items_saved and not report.aggregated:
+        return (
+            "<p class='muted'>Every finding in this close is large enough to "
+            "chase on its own. A materiality floor would change nothing here.</p>"
+        )
+
+    p = ["<div class='kpis'>"]
+    for label, value, note in (
+        ("chase individually", str(len(report.chased)),
+         f"Rs.{report.chased_total:,.0f}"),
+        ("chase as one claim", str(len(report.aggregated)),
+         f"Rs.{report.aggregated_total:,.0f}"),
+        ("waived", str(len(report.waived)),
+         f"Rs.{report.waived_total:,.0f}"),
+        ("of identified money", f"{report.waived_share:.2%}", "left unexamined"),
+    ):
+        p.append(
+            f"<div class='kpi'><div class='v'>{_esc(value)}</div>"
+            f"<div class='l'>{_esc(label)}</div>"
+            f"<div class='l muted'>{_esc(note)}</div></div>"
+        )
+    p.append("</div>")
+
+    p.append(
+        f"<p>Policy: {_esc(report.policy.describe())}. Every finding in this "
+        f"report is correct and none has been removed - precision is unchanged "
+        f"by any of this. The question here is narrower: does an item deserve a "
+        f"person? A Rs.1.77 fee overcharge is real, and nobody opens a ticket "
+        f"with the gateway about it.</p>"
+    )
+
+    if report.aggregated:
+        p.append("<h3>Patterns the floor would have hidden</h3>")
+        p.append(
+            "<p class='muted'>A floor is a blind spot at exactly the size an "
+            "error would choose. Systematic problems present as many small "
+            "items &mdash; that is what systematic means &mdash; so a class that "
+            "adds up comes back as one claim rather than as nothing.</p>"
+        )
+        p.append("<table><thead><tr><th>Class</th><th>Items</th>"
+                 "<th>Largest one</th><th>Together</th></tr></thead><tbody>")
+        for claim in report.aggregated:
+            p.append(
+                f"<tr><td>{_esc(claim.defect_class.value)}</td>"
+                f"<td>{claim.count}</td>"
+                f"<td class='muted'>Rs.{claim.largest:,.2f}</td>"
+                f"<td><strong>Rs.{claim.total:,.2f}</strong></td></tr>"
+            )
+        p.append("</tbody></table>")
+
+    p.append(
+        "<p class='muted'>Nothing was deleted. The waived total is printed "
+        "beside the floor that produced it, because the honest form of this is "
+        "&ldquo;here is what I did not look at, and here is how much it was&rdquo; "
+        "&mdash; not a shorter list with no account of what left it.</p>"
+    )
+    return "".join(p)
+
+
 def render(
     result: ReconResult,
     card: Scorecard,
@@ -702,6 +766,7 @@ def render(
         "<nav class='toc'>"
         "<a href='#cash'>Cash position</a>"
         "<a href='#money'>Money found</a>"
+        "<a href='#worth'>Worth chasing</a>"
         "<a href='#taper'>The taper</a>"
         "<a href='#learned'>What it learned</a>"
         "<a href='#risk'>Where the work will be</a>"
@@ -720,6 +785,12 @@ def render(
 
     p.append("<h2 id='money'>Money found</h2>")
     p.append(money_section(result))
+
+    # After the money, not before it: you find what is wrong, then decide which
+    # of it is worth someone's afternoon. Reversing these two reads as though
+    # the threshold shaped the findings, which is exactly what it must not do.
+    p.append("<h2 id='worth'>Worth chasing</h2>")
+    p.append(materiality_section(result))
 
     # --- what the system taught itself ------------------------------------
     p.append("<h2 id='learned'>What the system has learned</h2>")

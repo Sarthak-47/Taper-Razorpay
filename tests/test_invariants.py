@@ -2242,3 +2242,157 @@ def test_the_readme_headline_table_is_still_true() -> None:
     assert not stale, "the README headline table has become false:\n  " + "\n  ".join(stale)
 
     assert first.precision == 1.0 and last.precision == 1.0
+
+
+# --------------------------------------------------------------------------
+# Claim: "a materiality floor removes noise without creating a blind spot"
+#
+# Setting a floor and waiving everything under it builds a hiding place at
+# exactly the size an error would choose. Systematic problems present as many
+# small items - that is what systematic means - so the aggregation rule is not
+# a refinement of this feature, it is the half that makes it safe.
+# --------------------------------------------------------------------------
+
+def _findings_case(seed: int = 99, n: int = 60):
+    case = generate(n_batches=n, seed=seed)
+    return case, reconcile(case.bundle, config=RunConfig(use_llm=False))
+
+
+def test_materiality_never_loses_a_rupee() -> None:
+    """Every money-bearing finding lands in exactly one bucket."""
+    from taper.materiality import assess
+
+    _, result = _findings_case()
+    report = assess(result)
+
+    with_money = [f for f in result.findings if f.money_impact > Money("0.00")]
+    placed = (
+        len(report.chased) + len(report.waived)
+        + sum(c.count for c in report.aggregated)
+    )
+    assert placed == len(with_money), "a finding was dropped or double-counted"
+    assert (
+        report.chased_total + report.aggregated_total + report.waived_total
+        == sum((f.money_impact for f in with_money), Money("0.00"))
+    )
+
+
+def test_a_pattern_below_the_floor_comes_back_as_one_claim() -> None:
+    """The safety property. Fourteen recurring charges are not immaterial.
+
+    At a Rs.1,000 floor the bank's standing charges are individually beneath
+    it - the largest is Rs.500 - and together they are Rs.5,481, which is a
+    conversation worth having with the bank.
+    """
+    from taper.materiality import MaterialityPolicy, assess
+
+    _, result = _findings_case()
+    report = assess(result, MaterialityPolicy(
+        floor=Money("1000.00"), aggregate_floor=Money("5000.00")))
+
+    assert report.aggregated, "a class that adds up above the floor did not return"
+    for claim in report.aggregated:
+        assert claim.total >= Money("5000.00")
+        assert claim.largest < Money("1000.00"), (
+            "an aggregate claim contains an item that should have been chased alone"
+        )
+        assert claim.count > 1
+
+
+def test_a_high_enough_floor_waives_nothing_because_everything_aggregates() -> None:
+    """Raise the floor far enough and the aggregation rule catches every class.
+
+    Counter-intuitive and worth pinning: the floor stops removing money long
+    before it stops removing items, because past a point every class clears the
+    aggregate threshold on its own.
+    """
+    from taper.materiality import MaterialityPolicy, assess
+
+    _, result = _findings_case()
+    report = assess(result, MaterialityPolicy(
+        floor=Money("10000.00"), aggregate_floor=Money("5000.00")))
+
+    assert report.waived_total == Money("0.00"), report.waived_total
+    assert report.items_saved > 0
+
+
+def test_findings_with_no_amount_are_never_waived() -> None:
+    """A missing UTR costs nothing and breaks matchability.
+
+    Materiality is a statement about money. Applying it to something that was
+    never about money is a category error, and it would quietly discard the
+    findings that make future closes harder rather than more expensive.
+    """
+    from taper.materiality import MaterialityPolicy, assess
+
+    _, result = _findings_case()
+    report = assess(result, MaterialityPolicy(
+        floor=Money("999999.00"), aggregate_floor=Money("999999.00")))
+
+    zero = [f for f in result.findings if f.money_impact <= Money("0.00")]
+    assert zero, "this seed produced no zero-impact findings to test with"
+    assert len(report.not_about_money) == len(zero)
+    assert not any(f.money_impact <= Money("0.00") for f in report.waived)
+
+
+def test_materiality_does_not_touch_the_close_it_reads() -> None:
+    """It decides presentation of work, not truth.
+
+    Precision, recall and the close digest are computed upstream and must be
+    identical before and after - otherwise a controller could change the
+    reported accuracy of a close by changing a review threshold.
+    """
+    from taper.attest import attest
+    from taper.materiality import MaterialityPolicy, assess
+
+    case, result = _findings_case()
+    before_digest = attest(result).line()
+    before_precision = score(case, result, "none").precision
+    before_findings = len(result.findings)
+
+    assess(result, MaterialityPolicy(floor=Money("5000.00")))
+
+    assert attest(result).line() == before_digest
+    assert score(case, result, "none").precision == before_precision
+    assert len(result.findings) == before_findings
+
+
+def test_the_sweep_is_a_curve_not_a_cliff() -> None:
+    """The command exists to show a trade, so the trade has to be visible."""
+    from taper.materiality import sweep
+
+    _, result = _findings_case()
+    reports = sweep(result)
+
+    assert len(reports) >= 5
+    floors = [r.policy.floor for r in reports]
+    assert floors == sorted(floors), "the sweep is not ordered by floor"
+    assert reports[-1].items_after < reports[0].items_after, (
+        "raising the floor across the whole ladder saved no work at all"
+    )
+    for report in reports:
+        assert 0.0 <= report.waived_share < 0.05, (
+            f"floor {report.policy.floor} waived {report.waived_share:.1%} of "
+            "identified money - that is not a materiality policy, that is a leak"
+        )
+
+
+def test_the_report_decides_what_to_chase_after_it_reports_the_money() -> None:
+    """Order carries an argument here.
+
+    Putting the materiality section before the findings would read as though
+    the threshold shaped what was reported. It must not, and the report should
+    not look like it does.
+    """
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, _score(case, result, "mock"), case, "2026-06")
+
+    assert "Worth chasing" in html
+    assert html.index("Cash position") < html.index("Money found")
+    assert html.index("<h2 id='money'>") < html.index("<h2 id='worth'>")
+    assert "precision is unchanged" in html

@@ -158,7 +158,28 @@ finding can legitimately sit on both sides of a position, labelled.
 
 ---
 
-## 6. Forensics
+## 6. Materiality — what deserves a person
+
+Everything above decides what is *true*. This decides what is *worth someone's
+afternoon*, and it is deliberately downstream: a test asserts the close digest
+and precision are identical before and after, because a review threshold must
+never be able to change the reported accuracy of a close.
+
+A floor alone would be a blind spot at exactly the size an error would choose —
+systematic problems present as many small items, since that is what systematic
+means. So waived findings are grouped by what a human would claim them as, and
+any group clearing the aggregate floor returns as a single claim rather than as
+nothing. Fourteen standing bank charges are trivial per payout and ₹5,481 per
+quarter.
+
+Two carve-outs hold at any floor. Findings with no rupee amount are never waived
+— a missing UTR costs nothing and breaks matchability, and materiality is a
+statement about money. Neither are exceptions: "too small to investigate" is a
+judgement you can only make about something you already understand.
+
+---
+
+## 7. Forensics
 
 `taper forensics` screens first-digit distributions against Benford's law per
 channel, because fabrication presents concentrated — one compromised channel, one
@@ -172,7 +193,7 @@ policy.
 
 ---
 
-## 7. Engineering choices
+## 8. Engineering choices
 
 **Zero runtime dependencies.** A reviewer clones the repo and reproduces every
 number without installing anything. The model client is optional; the shipped
@@ -196,7 +217,7 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 
 ---
 
-## 8. Map of the code
+## 9. Map of the code
 
 | Path | What lives there |
 |---|---|
@@ -210,8 +231,9 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 | `ml/` | Exception-risk model, calibration, held-out evaluation |
 | `forensics.py` | Benford screening with a derived threshold |
 | `cashflow.py` | The cash position |
+| `materiality.py` | What deserves a person, and the aggregation rule |
 | `report.py` | The self-contained HTML close package |
-| `tests/` | 142 invariants, organised by the claim each one guards |
+| `tests/` | 149 invariants, organised by the claim each one guards |
 
 The test suite is organised by **claim**, not by module: each section guards a
 sentence the writeup makes, so a failure means the writeup has become false.

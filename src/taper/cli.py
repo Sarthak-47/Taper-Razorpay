@@ -634,6 +634,88 @@ def cmd_cash(args) -> None:
     print(BAR)
 
 
+def cmd_materiality(args) -> None:
+    """Which findings deserve a person, and what it costs to decide that."""
+    from .materiality import MaterialityPolicy, assess, sweep
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    cfg, client_name = _client_and_config(args)
+    _warn_mock(args)
+    result = reconcile(case.bundle, config=cfg)
+
+    agg = Money(str(args.aggregate_floor))
+    print(BAR)
+    print(f"  MATERIALITY - what is worth chasing  (seed {args.seed})")
+    print(BAR)
+    print("  Every finding below is correct; precision is unchanged by any of")
+    print("  this. The question here is different: does it deserve a person?")
+    print("  A Rs.1.77 fee overcharge is real, and nobody is opening a ticket")
+    print("  with the gateway about it.")
+    print("")
+    print(f"  findings in this close   {len(result.findings)}")
+    print(f"  aggregate floor          Rs.{agg:,.2f}")
+
+    print(f"\n  {'-' * 68}")
+    print("  THE TRADE, ACROSS FLOORS")
+    print(f"  {'-' * 68}")
+    print(f"  {'floor':>12}{'items':>8}{'saved':>8}{'claims':>8}"
+          f"{'waived':>14}{'% of money':>12}")
+    for report in sweep(result, aggregate_floor=agg):
+        print(f"  {'Rs.' + format(report.policy.floor, ',.0f'):>12}"
+              f"{report.items_after:>8}{report.items_saved:>8}"
+              f"{len(report.aggregated):>8}"
+              f"{'Rs.' + format(report.waived_total, ',.0f'):>14}"
+              f"{report.waived_share:>11.2%}")
+    print("")
+    print("  Two curves with different shapes. Items fall fast and money stays")
+    print("  flat for a while - that gap is the whole benefit, and it closes.")
+    print("  The floor worth picking is where items are still dropping and")
+    print("  waived money has not started to climb.")
+
+    policy = MaterialityPolicy(floor=Money(str(args.floor)), aggregate_floor=agg)
+    report = assess(result, policy)
+
+    print(f"\n  {'-' * 68}")
+    print(f"  AT Rs.{policy.floor:,.2f}")
+    print(f"  {'-' * 68}")
+    print(f"  {policy.describe()}")
+    print("")
+    print(f"  chase individually       {len(report.chased):>4}   "
+          f"Rs.{report.chased_total:>14,.2f}")
+    print(f"  chase as one claim       {len(report.aggregated):>4}   "
+          f"Rs.{report.aggregated_total:>14,.2f}")
+    print(f"  not about money at all   {len(report.not_about_money):>4}   "
+          f"{'(never waived)':>18}")
+    print(f"  waived                   {len(report.waived):>4}   "
+          f"Rs.{report.waived_total:>14,.2f}")
+
+    if report.aggregated:
+        print(f"\n  {'-' * 68}")
+        print("  PATTERNS THE FLOOR WOULD HAVE HIDDEN")
+        print(f"  {'-' * 68}")
+        print("  A floor is a blind spot the exact size an error would choose.")
+        print("  Systematic problems present as many small items - that is what")
+        print("  'systematic' means - so a class that adds up comes back as one")
+        print("  claim rather than as nothing.")
+        for claim in report.aggregated:
+            print(f"\n    {claim.line()}")
+            print(f"      largest single item Rs.{claim.largest:,.2f}, "
+                  f"below the Rs.{policy.floor:,.2f} floor")
+
+    print(f"\n  {'-' * 68}")
+    print("  VERDICT")
+    print(f"  {'-' * 68}")
+    for line in textwrap.wrap(report.verdict(), width=68,
+                              initial_indent="  ", subsequent_indent="  "):
+        print(line)
+    print("")
+    print("  Nothing was deleted. The waived total is printed next to the floor")
+    print("  that produced it, because the honest form of this is 'here is what")
+    print("  I did not look at' - not a shorter list with no explanation.")
+    print(f"  resolver: {client_name}")
+    print(BAR)
+
+
 def cmd_forensics(args) -> None:
     """First-digit analysis: does this population look lived, or authored?"""
     from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
@@ -1154,6 +1236,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="the cash position: how much money is actually there")
     ca.add_argument("--seed", type=int, default=99)
     ca.set_defaults(func=cmd_cash)
+
+    mt = sub.add_parser("materiality", parents=[shared],
+                        help="which findings deserve a person, and what that costs")
+    mt.add_argument("--seed", type=int, default=99)
+    mt.add_argument("--floor", default="1000.00",
+                    help="chase anything at or above this individually")
+    mt.add_argument("--aggregate-floor", default="5000.00",
+                    help="chase a class of small items if it totals this much")
+    mt.set_defaults(func=cmd_materiality)
 
     fx = sub.add_parser("forensics", parents=[shared],
                         help="first-digit analysis: lived amounts, or authored?")

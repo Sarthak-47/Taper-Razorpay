@@ -2,6 +2,11 @@
 
 **A settlement reconciliation agent that shrinks its own AI usage over time.**
 
+[![CI](https://github.com/Sarthak-47/Razorpay/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarthak-47/Razorpay/actions/workflows/ci.yml)
+[![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.13-blue)](pyproject.toml)
+[![Dependencies: none](https://img.shields.io/badge/runtime%20dependencies-none-success)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
 Razorpay AI Buildathon — Track 04, AI Finance Controller.
 
 ---
@@ -45,6 +50,7 @@ Four more things worth thirty seconds each:
 | Command | What it shows |
 |---|---|
 | `taper reconcile --clean` | The negative control — a period where nothing is wrong. It finds nothing, escalates nothing, calls no model |
+| `taper materiality` | Which findings deserve a person — and the aggregation rule that stops a floor from hiding a pattern |
 | `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
@@ -57,6 +63,62 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+
+---
+
+## What is worth chasing
+
+Every finding this engine produces is correct — precision is 1.000 and nothing
+here changes that. But **correct is not the same as worth chasing.** A ₹1.77 fee
+overcharge is real, and no controller alive is opening a ticket with the gateway
+about it. Hand over seventeen of those alongside a ₹470,000 duplicate capture and
+you haven't helped; you've buried the one that matters.
+
+```bash
+python -m taper.cli --no-llm materiality --seed 99 --batches 60
+```
+
+The obvious move is a floor: waive anything under ₹1,000. The obvious move is
+also **a blind spot at exactly the size an error would choose.** Systematic
+problems present as many small items — that is what *systematic* means.
+
+So waived items are grouped by what a human would claim them as, and any group
+clearing the aggregate floor comes back — not as fourteen tickets, but as one:
+
+```
+14 x unrecorded_adjustment, none individually above the floor, Rs.5,481.00 together
+    largest single item Rs.500.00, below the Rs.1,000.00 floor
+```
+
+That is the bank's standing charge, which is trivial per payout and a
+conversation worth having per quarter. **The floor removes noise; the aggregate
+rule stops the floor from removing a pattern.**
+
+The command sweeps a ladder of floors, because a controller doesn't want a
+default, they want the shape of the trade:
+
+| Floor | Items left | Saved | Claims | Waived | % of money |
+|---|---|---|---|---|---|
+| ₹250 | 174 | 33 | 0 | ₹2,347 | 0.06% |
+| ₹1,000 | 151 | 56 | 1 | ₹8,270 | 0.21% |
+| ₹2,500 | 137 | 70 | 4 | ₹12,742 | 0.32% |
+| ₹5,000 | 122 | 85 | **7** | **₹0** | **0.00%** |
+
+Read the last row twice. Past a point the floor stops removing *money* entirely
+while it is still removing *items* — every class clears the aggregate threshold
+on its own, so 85 fewer things to work through costs nothing unexamined. Two
+curves with different shapes, and the gap between them is the whole feature.
+
+**Two things are never waived, at any floor.** Findings with no rupee amount — a
+missing UTR costs nothing and breaks matchability, and materiality is a statement
+about money. And exceptions: "too small to investigate" is a judgement you can
+only make about something you understand, and by definition those aren't
+understood yet.
+
+Nothing is deleted. The waived total is printed beside the floor that produced
+it, and a test asserts the close digest and precision are byte-identical before
+and after — a review threshold must never be able to change the reported accuracy
+of a close.
 
 ---
 
@@ -143,7 +205,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**142 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**149 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -869,7 +931,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **142 tests green, 16 CLI commands**, no API key required.
+Running end-to-end: **149 tests green, 17 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
