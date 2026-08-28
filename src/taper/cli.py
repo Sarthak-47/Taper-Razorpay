@@ -62,13 +62,29 @@ def _warn_mock(args) -> None:
 
 
 def cmd_reconcile(args) -> None:
-    case = generate(n_batches=args.batches, seed=args.seed)
+    from .generator import DefectRates
+
+    clean = getattr(args, "clean", False)
+    case = generate(
+        n_batches=args.batches, seed=args.seed,
+        rates=DefectRates.none() if clean else None, pristine=clean,
+    )
     cfg, client_name = _client_and_config(args)
     _warn_mock(args)
 
-    from .engine.rules import RuleStore
+    from .engine.rules import Rule, RuleStore
 
     store = RuleStore(RULE_STORE_PATH if args.persist_rules else None)
+    if clean:
+        # The engine is not told the international-card rate anywhere else, and
+        # on a clean period that one unknown is the only thing left to ask
+        # about. Supplying it is what makes "nothing at all" the honest result
+        # rather than a suppressed one - see the --clean note printed below.
+        store.rules.append(Rule(
+            rule_id="r-intl", kind="fee_variant",
+            params={"method": "intl_card", "rate": "0.03"},
+            origin_exception="ratecard::intl_card", learned_on=case.bundle.period,
+        ))
     result = reconcile(case.bundle, store=store, config=cfg)
     card = score(case, result, client_name)
 
@@ -91,17 +107,24 @@ def cmd_reconcile(args) -> None:
     print(f"\n  {'-' * 68}")
     print("  ACCURACY vs INJECTED GROUND TRUTH")
     print(f"  {'-' * 68}")
-    print(f"  {'defect class':<26}{'sup':>5}{'TP':>5}{'FP':>5}{'FN':>5}{'prec':>8}{'rec':>8}")
-    for dc in DefectClass:
-        s = card.per_class[dc]
-        if not s.support and not s.fp:
-            continue
-        print(f"  {dc.value:<26}{s.support:>5}{s.tp:>5}{s.fp:>5}{s.fn:>5}"
-              f"{s.precision:>8.3f}{s.recall:>8.3f}")
-    print(f"  {'OVERALL':<26}{card.tp + card.fn:>5}{card.tp:>5}{card.fp:>5}{card.fn:>5}"
-          f"{card.precision:>8.3f}{card.recall:>8.3f}")
-    print(f"\n  false-positive cost   {card.false_positive_cost_minutes:.0f} review-minutes "
-          f"({card.fp} false flags x 4 min)")
+    if clean:
+        # Precision over zero findings is undefined, and printing it as "nan"
+        # invites the reader to treat an empty table as a measurement. On a
+        # clean period the result is the zeros above, not a score.
+        print("  Nothing was injected, so there is nothing to score. The")
+        print("  claim on a clean period is the counts above, not a rate.")
+    else:
+        print(f"  {'defect class':<26}{'sup':>5}{'TP':>5}{'FP':>5}{'FN':>5}{'prec':>8}{'rec':>8}")
+        for dc in DefectClass:
+            s = card.per_class[dc]
+            if not s.support and not s.fp:
+                continue
+            print(f"  {dc.value:<26}{s.support:>5}{s.tp:>5}{s.fp:>5}{s.fn:>5}"
+                  f"{s.precision:>8.3f}{s.recall:>8.3f}")
+        print(f"  {'OVERALL':<26}{card.tp + card.fn:>5}{card.tp:>5}{card.fp:>5}{card.fn:>5}"
+              f"{card.precision:>8.3f}{card.recall:>8.3f}")
+        print(f"\n  false-positive cost   {card.false_positive_cost_minutes:.0f} review-minutes "
+              f"({card.fp} false flags x 4 min)")
 
     print(f"\n  {'-' * 68}")
     print("  WHERE THE WORK HAPPENED")
@@ -111,19 +134,23 @@ def cmd_reconcile(args) -> None:
         share = n / len(result.findings) if result.findings else 0
         print(f"  {layer.value:<22}{n:>5}  {share:6.1%}")
 
-    op = auto_clear_operating_point(case, result)
-    print(f"\n  {'-' * 68}")
-    print("  AUTO-CLEAR OPERATING POINT (target precision 0.99)")
-    print(f"  {'-' * 68}")
-    if op["coverage"]:
-        print(f"  at confidence >= {op['threshold']}: auto-clear {op['coverage']:.1%} of findings "
-              f"at {op['precision']:.3f} precision")
-        print(f"  {op['auto_cleared']} auto-cleared, {op['routed_to_human']} to a human, "
-              f"{op['review_minutes_saved']:.0f} review-minutes saved")
-    else:
-        print("  no threshold reaches target precision - route everything to a human")
+    # Everything below describes how findings get triaged. With no findings
+    # there is nothing to triage, and the fallback line ("route everything to a
+    # human") reads as a failure rather than as an empty queue.
+    if not clean:
+        op = auto_clear_operating_point(case, result)
+        print(f"\n  {'-' * 68}")
+        print("  AUTO-CLEAR OPERATING POINT (target precision 0.99)")
+        print(f"  {'-' * 68}")
+        if op["coverage"]:
+            print(f"  at confidence >= {op['threshold']}: auto-clear {op['coverage']:.1%} of "
+                  f"findings at {op['precision']:.3f} precision")
+            print(f"  {op['auto_cleared']} auto-cleared, {op['routed_to_human']} to a human, "
+                  f"{op['review_minutes_saved']:.0f} review-minutes saved")
+        else:
+            print("  no threshold reaches target precision - route everything to a human")
 
-    bins = calibration(case, result)
+    bins = [] if clean else calibration(case, result)
     if bins:
         print(f"\n  {'-' * 68}")
         print("  CALIBRATION  (stated confidence vs observed hit rate)")
@@ -143,10 +170,43 @@ def cmd_reconcile(args) -> None:
         if len(result.exceptions) > args.max_exceptions:
             print(f"      ... and {len(result.exceptions) - args.max_exceptions} more")
 
+    if clean:
+        print(f"\n  {'-' * 68}")
+        print("  NEGATIVE CONTROL")
+        print(f"  {'-' * 68}")
+        for line in _NEGATIVE_CONTROL_NOTE.strip().splitlines():
+            print(f"  {line}".rstrip())
+        print("")
+        quiet = not (result.findings or result.exceptions or result.llm_calls)
+        print("  Result: nothing found, nothing escalated, no model calls."
+              if quiet else
+              "  Result: the engine found work on a period that had none.")
+
     if args.persist_rules:
         store.save()
         print(f"\n  rule store: {len(store)} rule(s) -> {RULE_STORE_PATH}")
     print(BAR)
+
+
+_NEGATIVE_CONTROL_NOTE = """
+Nothing was injected into this period, and the banks were stripped of
+their habits - no settlement lag, no standing charge, the UTR always
+written where the strict pattern reads it. Everything else about the
+data is unchanged, so this is not an easier period, only an honest one.
+
+Precision says how often a finding is wrong, and it is measured on
+periods that contain defects. It cannot answer the opposite question:
+what does the engine do when there is genuinely nothing to find? An
+engine that manufactures a dozen exceptions on a quiet month spends
+human attention that no metric here would charge it for, and it teaches
+the controller to skim the queue - which is how the one real finding
+eventually gets waved through.
+
+One rule is pre-loaded: international cards cost 3%, and the settlement
+report never says so. Without it a clean period raises exactly one item,
+and it is a question about a rate card rather than an accusation. Run
+this seed without --clean to see the same engine on a month with defects.
+"""
 
 
 def cmd_ablate(args) -> None:
@@ -1014,6 +1074,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seed", type=int, default=7)
     r.add_argument("--persist-rules", action="store_true")
     r.add_argument("--max-exceptions", type=int, default=10)
+    r.add_argument(
+        "--clean", action="store_true",
+        help="negative control: a period where nothing is wrong",
+    )
     r.set_defaults(func=cmd_reconcile)
 
     a = sub.add_parser("ablate", parents=[shared], help="deterministic vs full stack")

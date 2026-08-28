@@ -42,6 +42,11 @@ jobs:
 
       # The pipeline must stay runnable with no API key. If these break, a
       # reviewer cloning the repo cannot reproduce a single number in the README.
+      # The negative control. If this ever prints a finding, every precision
+      # number in the README is measuring the wrong thing.
+      - name: Smoke - negative control (a period with nothing wrong)
+        run: python -m taper.cli --no-llm reconcile --clean --seed 7 --batches 30
+
       - name: Smoke - cash position
         run: python -m taper.cli --no-llm cash --seed 99
 

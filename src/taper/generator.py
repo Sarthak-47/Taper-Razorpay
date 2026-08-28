@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -131,6 +131,17 @@ class DefectRates:
 
     ``cross_cycle_refund`` is conditional on a refund existing at all (~12% of
     transactions), so its effective rate is roughly a quarter of the value here.
+
+    **Two of these fields govern only half of their class**, which is worth
+    knowing before trusting a zero. ``timing_shift`` and
+    ``unrecorded_adjustment`` each have a structural component that comes from
+    the bank profile - a fixed settlement lag, a charge deducted every payout -
+    and those are properties of the bank rather than random events, so no rate
+    controls them. The rate governs the *jitter* on top: the extra day, the
+    one-off deduction. Setting both to zero still yields ~50 discrepancies,
+    because a bank that always settles T+2 is still a bank the books have to
+    agree with. Use :meth:`none` together with ``pristine=True`` when what you
+    want is a period where genuinely nothing is wrong.
     """
 
     duplicate_capture: float = 0.03
@@ -148,6 +159,17 @@ class DefectRates:
     # operator. Spreading it evenly would hide it in the honest majority, which
     # is precisely the mistake segment testing exists to avoid.
     fabricated_channel: float = 0.5
+
+    @classmethod
+    def none(cls) -> DefectRates:
+        """Every rate zero: inject nothing.
+
+        The negative control. Measuring precision on a defective period says
+        how often a finding is wrong; it cannot say whether a *clean* period
+        produces findings at all, and an engine that invents work on a close
+        where nothing happened is expensive in the way nobody measures.
+        """
+        return cls(**{f.name: 0.0 for f in fields(cls)})
 
 
 @dataclass
@@ -210,8 +232,16 @@ def generate(
     start: date = date(2026, 6, 1),
     batch_spacing_days: int = 2,
     charge_overrides: dict[str, Money] | None = None,
+    pristine: bool = False,
 ) -> GeneratedCase:
     """Build one reconciliation period across all three sources.
+
+    ``pristine`` strips the banks of their habits as well - no settlement lag,
+    no standing charge, the UTR always written where the strict pattern reads
+    it. Paired with :meth:`DefectRates.none` it produces a period where nothing
+    is wrong, which is the only way to ask what the engine does when there is
+    genuinely nothing to find. Everything else about the data is unchanged, so
+    a clean period is not an easier period - just an honest one.
 
     ``batch_spacing_days`` is the stress knob. Batches settle this many days
     apart, so shrinking it packs more batches into every settlement window and
@@ -246,6 +276,14 @@ def generate(
         utr = f"UTR{seed}{b:04d}{rng.randint(1000, 9999)}"
         settled_on = start + timedelta(days=b * batch_spacing_days)
         profile = rng.choice(BANK_PROFILES)
+        if pristine:
+            # Same bank, none of its habits: settles same-day, deducts nothing,
+            # writes the UTR where the strict pattern can read it.
+            profile = replace(
+                profile, settle_offset_days=0, adjustment_amount=None,
+                adjustment_keyword=None, ref_style=False,
+                narration_template="NEFT-{utr}-RAZORPAY SOFTWARE PVT LTD",
+            )
         bank_name = profile.name
         rows: list[SettlementRow] = []
 

@@ -44,6 +44,7 @@ Four more things worth thirty seconds each:
 
 | Command | What it shows |
 |---|---|
+| `taper reconcile --clean` | The negative control — a period where nothing is wrong. It finds nothing, escalates nothing, calls no model |
 | `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
@@ -56,6 +57,46 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+
+---
+
+## What it does when nothing is wrong
+
+Every accuracy number in this README is measured on periods that contain
+defects. Precision says how often a finding is *wrong*. It cannot say whether a
+**clean** period produces findings at all — and that is the failure mode nobody
+charges for. An engine that manufactures a dozen exceptions on a quiet month
+spends human attention no metric here would ever bill it for, and it teaches the
+controller to skim the queue, which is how the one real finding eventually gets
+waved through.
+
+```bash
+python -m taper.cli --no-llm reconcile --clean --seed 7 --batches 40
+```
+
+```
+batches matched       40
+clean match rate      100.0%
+findings              0
+exceptions (to human) 0
+llm calls             0  (0.00 per 100 records)
+```
+
+This is not an easier period. The volumes, the amount distribution, the batch
+sizes and the matching problem are unchanged — only the defects are gone, and
+the banks are stripped of their habits (no settlement lag, no standing charge,
+the UTR written where the strict pattern reads it). The accuracy table is
+suppressed rather than printed full of `nan`: precision over zero findings is
+undefined, and an empty table with a number in it invites you to read it as a
+measurement.
+
+**One rule is pre-loaded**, and it is worth knowing why. International cards
+genuinely cost 3%, and the settlement report never says so, so without that rule
+a clean period raises exactly one item — a *question about a rate card* rather
+than a pile of overcharge accusations. That is the design rule visible at its
+limit: [assert only when unambiguous](src/taper/engine/matching.py). Three tests
+pin all of it, including that the question disappears once the rate card is
+learned and never comes back.
 
 ---
 

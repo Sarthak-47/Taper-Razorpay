@@ -17,7 +17,7 @@ from taper.engine.llm import verify_proposal
 from taper.engine.matching import run_deterministic
 from taper.engine.pipeline import RunConfig, reconcile
 from taper.engine.rules import ConfirmedCase, Rule, RuleStore
-from taper.generator import generate
+from taper.generator import DefectRates, generate
 from taper.metrics.harness import score
 from taper.models import Money
 
@@ -2039,3 +2039,121 @@ def test_the_documented_seed_reproduces_the_fixture_byte_for_byte() -> None:
             )
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Claim: "on a close where nothing is wrong, it says nothing"
+#
+# The negative control, and it was missing for most of this project's life.
+# Precision measures how often a finding is wrong; it is computed on periods
+# that contain real defects, so it cannot answer the opposite question - what
+# does the engine do when there is genuinely nothing to find?
+#
+# An engine that manufactures a dozen exceptions on a clean month is expensive
+# in a way none of the headline metrics show: it spends human attention, and it
+# trains the controller to ignore the queue, which is how the one real finding
+# gets waved through.
+# --------------------------------------------------------------------------
+
+def _clean_case(seed: int):
+    return generate(n_batches=40, seed=seed, rates=DefectRates.none(), pristine=True)
+
+
+def _known_rate_card() -> RuleStore:
+    """A store that has been told what international cards cost.
+
+    Without it the engine correctly raises one standing question - see
+    ``test_the_one_escalation_on_a_clean_close_is_a_question`` below.
+    """
+    store = RuleStore()
+    store.rules.append(
+        Rule(
+            rule_id="r-intl",
+            kind="fee_variant",
+            params={"method": "intl_card", "rate": "0.03"},
+            origin_exception="ratecard::intl_card",
+            learned_on="2026-06",
+        )
+    )
+    return store
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_clean_close_produces_nothing_at_all(seed: int) -> None:
+    case = _clean_case(seed)
+    assert not case.defects, "the pristine generator injected something"
+
+    result = reconcile(
+        case.bundle, config=RunConfig(use_llm=False), store=_known_rate_card()
+    )
+    batches = {row.settlement_batch_id for row in case.bundle.settlement}
+
+    assert not result.findings, [f.defect_class for f in result.findings[:5]]
+    assert not result.exceptions, [e.kind for e in result.exceptions[:5]]
+    assert len(result.matches) == len(batches), "a clean batch went unmatched"
+    assert result.match_rate == 1.0
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_clean_close_costs_no_model_calls(seed: int) -> None:
+    """Layer 3 is priced per close, and a clean close should be free.
+
+    This is the thesis stated at its limit. If a month with nothing wrong still
+    pays for inference, the taper is bounded below by noise rather than by the
+    work that actually exists.
+    """
+    from taper.engine.llm import MockClient
+
+    case = _clean_case(seed)
+    result = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True),
+        client=MockClient(),
+        store=_known_rate_card(),
+    )
+    assert result.llm_calls == 0, f"{result.llm_calls} model call(s) on a clean close"
+
+
+def test_the_one_escalation_on_a_clean_close_is_a_question() -> None:
+    """With no rule card learned, a clean period raises exactly one item.
+
+    International cards genuinely cost 3% and nothing in the settlement report
+    says so, so every one of them is billed above the rate the engine assumes.
+    Reporting that as a pile of overcharges would be a false accusation;
+    reporting it as one question about a rate card we do not have is the honest
+    reading, and it is the *only* thing a clean close asks about.
+
+    It resolves once and never comes back, which is what separates a standing
+    question from a false positive.
+    """
+    case = _clean_case(99)
+    cold = reconcile(case.bundle, config=RunConfig(use_llm=False), store=RuleStore())
+
+    assert not cold.findings, "a rate card we lack is a question, not a finding"
+    assert [e.kind for e in cold.exceptions] == ["unknown_rate_card"]
+
+    warm = reconcile(
+        case.bundle, config=RunConfig(use_llm=False), store=_known_rate_card()
+    )
+    assert not warm.exceptions, "learning the rate card did not settle the question"
+
+
+def test_the_clean_flag_reaches_the_report_and_prints_no_score(capsys) -> None:
+    """`taper reconcile --clean` is what a reader runs; test that, not a helper.
+
+    The accuracy table must be suppressed rather than printed full of nan:
+    precision over zero findings is undefined, and an empty table with a number
+    in it invites the reader to treat it as a measurement.
+    """
+    from taper.cli import main
+
+    assert main(["--mock", "--no-llm", "reconcile", "--clean",
+                 "--seed", "7", "--batches", "20"]) in (0, None)
+    out = capsys.readouterr().out
+
+    assert "NEGATIVE CONTROL" in out
+    assert "nothing found, nothing escalated, no model calls" in out
+    assert "nan" not in out, "printed an undefined score on a period with no defects"
+    assert "AUTO-CLEAR OPERATING POINT" not in out, (
+        "offered a triage threshold for an empty queue"
+    )
