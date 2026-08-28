@@ -139,9 +139,11 @@ with this section, ahead of reconciliation, because that is the reading order.
 the deterministic core and its design rule; [`rules.py`](src/taper/engine/rules.py)
 is the learning loop and the gate that makes it safe;
 [`llm.py`](src/taper/engine/llm.py) is the model layer and the arithmetic that
-overrules it.
+overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
+in one page: the four layers, the three independent reasons the model cannot
+decide anything, and how the taper is measured.
 
-**141 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**142 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -867,7 +869,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **141 tests green, 16 CLI commands**, no API key required.
+Running end-to-end: **142 tests green, 16 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
