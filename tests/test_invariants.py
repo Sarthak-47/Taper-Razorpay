@@ -2200,3 +2200,45 @@ def test_every_rule_kind_can_describe_itself() -> None:
         rule_id="r", kind="fee_variant", params={"method": "intl_card", "rate": "0.03"},
         origin_exception="x", learned_on="2026-06",
     ).summary(), "a rate card should read as a percentage, not a raw decimal"
+
+
+# --------------------------------------------------------------------------
+# Claim: the headline table in the README
+#
+# Every other test here guards a *property* - precision never drops, a rule
+# never contradicts history. This one guards the specific four numbers a reader
+# sees before anything else, because those are the numbers that rot silently. A
+# generator tweak that shifts month 6 from 95.9% to 91% breaks no property and
+# no test, and the README simply becomes false.
+# --------------------------------------------------------------------------
+
+def test_the_readme_headline_table_is_still_true() -> None:
+    from taper.campaign import run_campaign_averaged
+    from taper.engine.llm import MockClient
+
+    rows = run_campaign_averaged(
+        runs=8, months=6, n_batches=40,
+        config=RunConfig(use_llm=True), client=MockClient(),
+    )
+    first, last = rows[0], rows[-1]
+
+    # Tolerances are loose enough to absorb a rounding wobble and tight enough
+    # that a real regression cannot hide inside them. If one of these fails,
+    # fix the README rather than the tolerance - the table is a claim, not a
+    # target.
+    claims = [
+        ("model calls / 100, month 1", first.llm_calls_per_100, 1.12, 0.05),
+        ("model calls / 100, month 6", last.llm_calls_per_100, 0.50, 0.05),
+        ("clean match rate, month 1", first.match_rate, 0.654, 0.02),
+        ("clean match rate, month 6", last.match_rate, 0.959, 0.02),
+        ("human reviews, month 1", first.human_reviews, 14.1, 1.0),
+        ("human reviews, month 6", last.human_reviews, 5.8, 1.0),
+    ]
+    stale = [
+        f"{label}: README says {claimed}, run gives {actual:.3f}"
+        for label, actual, claimed, tol in claims
+        if abs(actual - claimed) > tol
+    ]
+    assert not stale, "the README headline table has become false:\n  " + "\n  ".join(stale)
+
+    assert first.precision == 1.0 and last.precision == 1.0
