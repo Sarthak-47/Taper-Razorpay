@@ -229,6 +229,9 @@ class MonthResult:
     rules_rejected: int
     human_reviews: int
     exceptions: int
+    # Kept so the queue can be aged across closes. Counts alone cannot tell a
+    # shrinking queue from the same handful of items re-raised every month.
+    open_exceptions: list[Any] = field(default_factory=list)
 
     @property
     def rules_learned(self) -> int:
@@ -325,6 +328,7 @@ def run_campaign(
                 rules_rejected=len(store.rejected) - rejected_before,
                 human_reviews=oracle.reviews,
                 exceptions=len(result.exceptions),
+                open_exceptions=list(result.exceptions),
             )
         )
 

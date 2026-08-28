@@ -50,6 +50,7 @@ Four more things worth thirty seconds each:
 | Command | What it shows |
 |---|---|
 | `taper reconcile --clean` | The negative control — a period where nothing is wrong. It finds nothing, escalates nothing, calls no model |
+| `taper aging` | Is the queue shrinking, or the same items every month? The control that makes the taper falsifiable |
 | `taper materiality` | Which findings deserve a person — and the aggregation rule that stops a floor from hiding a pattern |
 | `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
@@ -63,6 +64,61 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+
+---
+
+## Is the queue actually shrinking?
+
+The headline says human reviews fall 14.1 → 5.8. That is true, and **it is not
+sufficient.** Two completely different worlds produce that same chart:
+
+- the engine learns each recurring situation, those items stop appearing, and
+  what's left in month six is genuinely new work; or
+- the volume of novel problems happens to fall while a handful of items nobody
+  can resolve get re-raised every single close.
+
+A falling *count* cannot tell those apart. Only identity can — so `taper aging`
+gives an exception a name that survives the period it was raised in, and asks how
+many closes it has been asked in.
+
+```bash
+python -m taper.cli --mock aging --months 6
+```
+
+```
+                            standing  recurring   stale  episodic
+with the learning loop             3          0       0        54
+with learning disabled             3          1       1        65
+```
+
+Same six closes, same seeds, same data. The only difference is whether the store
+is allowed to keep what a human worked out:
+
+```
+WITH THE LEARNING LOOP
+  unknown_rate_card::method=intl_card - asked in month 1
+
+WITH LEARNING DISABLED
+  unknown_rate_card::method=intl_card - asked in months 1, 2, 3, 4, 5, 6  STALE
+```
+
+**That is the control.** If the falling exception count were an artefact of the
+data rather than the loop, both columns would look the same. A test asserts the
+two runs must *disagree* — if they ever converge, the headline chart means
+nothing and CI says so.
+
+The hard part is identity. Subject ids are period-scoped by construction
+(`setl_500_004` exists in exactly one close), so keying on them would prove that
+nothing ever recurs — a measurement that always passes and therefore says
+nothing. Exceptions split honestly instead: **standing** questions outlive their
+period ("what rate card covers `intl_card`" is the same question in June and
+November), while **episodic** ones are about one specific batch and cannot recur.
+They're counted separately, because averaging them together would dilute the
+recurrence rate toward zero and make the metric look good for a reason unrelated
+to learning.
+
+An item on its third consecutive appearance stops being a queue entry and becomes
+a process that has stalled. It gets reported as one.
 
 ---
 
@@ -205,7 +261,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**149 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**154 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -931,7 +987,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **149 tests green, 17 CLI commands**, no API key required.
+Running end-to-end: **154 tests green, 18 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the

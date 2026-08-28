@@ -47,6 +47,9 @@ jobs:
       - name: Smoke - negative control (a period with nothing wrong)
         run: python -m taper.cli --no-llm reconcile --clean --seed 7 --batches 30
 
+      - name: Smoke - exception aging
+        run: python -m taper.cli --mock aging --months 4 --batches 20
+
       - name: Smoke - materiality
         run: python -m taper.cli --no-llm materiality --seed 99 --batches 40
 

@@ -16,6 +16,7 @@ import pytest
 from taper.engine.llm import verify_proposal
 from taper.engine.matching import run_deterministic
 from taper.engine.pipeline import RunConfig, reconcile
+from taper.engine.results import Exception_
 from taper.engine.rules import ConfirmedCase, Rule, RuleStore
 from taper.generator import DefectRates, generate
 from taper.metrics.harness import score
@@ -2396,3 +2397,106 @@ def test_the_report_decides_what_to_chase_after_it_reports_the_money() -> None:
     assert html.index("Cash position") < html.index("Money found")
     assert html.index("<h2 id='money'>") < html.index("<h2 id='worth'>")
     assert "precision is unchanged" in html
+
+
+# --------------------------------------------------------------------------
+# Claim: "the falling exception count is the loop working, not a stuck queue"
+#
+# A queue that shrinks because each recurring situation got learned, and a
+# queue that shrinks while a handful of unanswerable items are re-raised every
+# close, produce an identical chart. The count cannot separate them. These
+# tests exist because the headline metric is not, by itself, evidence.
+# --------------------------------------------------------------------------
+
+def test_identity_survives_the_period_that_raised_it() -> None:
+    """Keying on subject_id would prove nothing ever recurs.
+
+    Subject ids are period-scoped by construction, so a recurrence measure
+    built on them always passes - which makes it worthless. A standing question
+    must key on the thing being asked about, not on this month's row.
+    """
+    from taper.aging import identity
+
+    june = Exception_(subject_id="ratecard::intl_card", kind="unknown_rate_card",
+                      context={"method": "intl_card"}, reason="")
+    november = Exception_(subject_id="ratecard::intl_card", kind="unknown_rate_card",
+                          context={"method": "intl_card"}, reason="")
+    assert identity(june) == identity(november) is not None
+
+    other = Exception_(subject_id="ratecard::upi", kind="unknown_rate_card",
+                       context={"method": "upi"}, reason="")
+    assert identity(other) != identity(june)
+
+
+def test_a_batch_specific_exception_has_no_standing_identity() -> None:
+    """Episodic items cannot recur, and must not be counted as though they could.
+
+    Folding them in would dilute the recurrence rate toward zero and make the
+    metric look healthy for a reason unrelated to learning.
+    """
+    from taper.aging import identity
+
+    for kind in ("unmatched_batch", "unclaimed_credit"):
+        exc = Exception_(subject_id="setl_500_004", kind=kind,
+                         context={"expected_net": "1000.00"}, reason="")
+        assert identity(exc) is None
+
+
+def test_consecutive_runs_are_broken_by_a_gap() -> None:
+    """Asked in months 1, 2, then again in 6 is not a four-month-old item."""
+    from taper.aging import AgedItem
+
+    assert AgedItem("x", months=[1, 2, 3]).consecutive == 3
+    assert AgedItem("x", months=[1, 2, 6]).consecutive == 1
+    assert AgedItem("x", months=[1, 4, 5]).consecutive == 2
+    assert AgedItem("x", months=[1, 2, 3]).is_stale
+    assert not AgedItem("x", months=[1, 2, 6]).is_stale
+
+
+def test_learning_is_what_stops_a_question_being_asked_again() -> None:
+    """The control that makes the whole taper claim falsifiable.
+
+    Same six closes, same data, same seeds - the only difference is whether the
+    rule store is allowed to keep what a human worked out. With learning, the
+    rate-card question is asked once. Without it, the engine asks the same
+    question every single close and never gets further.
+
+    If this test ever fails in the direction of the two runs agreeing, the
+    falling exception count is an artefact of the data rather than the loop,
+    and the headline chart means nothing.
+    """
+    from taper.aging import build
+    from taper.campaign import run_campaign
+    from taper.engine.llm import MockClient
+
+    def age(learn: bool):
+        campaign = run_campaign(
+            months=6, n_batches=40,
+            config=RunConfig(use_llm=True), client=MockClient(), learn=learn,
+        )
+        return build([m.open_exceptions for m in campaign.months])
+
+    learned, unlearned = age(True), age(False)
+
+    assert not learned.stale, (
+        "a question was still being asked three closes running even with "
+        f"learning on: {[i.identity for i in learned.stale]}"
+    )
+    assert unlearned.stale, (
+        "with learning disabled nothing went stale - either the control is "
+        "broken or learning was not what resolved these"
+    )
+    assert len(unlearned.recurring) > len(learned.recurring)
+
+
+def test_one_close_cannot_age_a_question_twice() -> None:
+    """Several rows can provoke one question; it is still one question."""
+    from taper.aging import build
+
+    exc = Exception_(subject_id="ratecard::intl_card", kind="unknown_rate_card",
+                     context={"method": "intl_card"}, reason="")
+    report = build([[exc, exc, exc], [exc]])
+
+    assert report.standing_total == 1
+    assert report.items[0].months == [1, 2]
+    assert report.items[0].consecutive == 2

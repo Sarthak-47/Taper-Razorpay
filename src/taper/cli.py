@@ -716,6 +716,77 @@ def cmd_materiality(args) -> None:
     print(BAR)
 
 
+def cmd_aging(args) -> None:
+    """Is the queue shrinking, or is it the same items every month?"""
+    from .aging import STALE_AFTER, build
+    from .campaign import run_campaign
+
+    cfg, client_name = _client_and_config(args)
+    cfg.use_llm = True
+    _warn_mock(args)
+
+    print(BAR)
+    print(f"  EXCEPTION AGING - {args.months} closes")
+    print(BAR)
+    print("  The campaign reports human reviews falling. That is true and it")
+    print("  is not sufficient: a queue that shrinks because the engine learned")
+    print("  each recurring situation, and a queue that shrinks while a handful")
+    print("  of unanswerable items get re-raised every close, produce the same")
+    print("  chart. A count cannot tell them apart. Only identity can.")
+
+    runs = []
+    for learn, label in ((True, "with the learning loop"),
+                         (False, "with learning disabled")):
+        result = run_campaign(
+            months=args.months, n_batches=args.batches,
+            config=cfg, learn=learn,
+        )
+        report = build([m.open_exceptions for m in result.months])
+        runs.append((label, result, report))
+
+    print(f"\n  {'-' * 68}")
+    print("  THE SAME SIX CLOSES, WITH AND WITHOUT LEARNING")
+    print(f"  {'-' * 68}")
+    print(f"  {'':<26}{'standing':>10}{'recurring':>11}{'stale':>8}{'episodic':>10}")
+    for label, _, report in runs:
+        print(f"  {label:<26}{report.standing_total:>10}"
+              f"{len(report.recurring):>11}{len(report.stale):>8}"
+              f"{report.episodic_total:>10}")
+    print("")
+    print("  standing   a question that outlives the close that raised it")
+    print("  recurring  asked in more than one close")
+    print(f"  stale      asked {STALE_AFTER}+ closes running and still unanswered")
+    print("  episodic   about one batch or credit; cannot recur by construction")
+
+    for label, result, report in runs:
+        print(f"\n  {'-' * 68}")
+        print(f"  {label.upper()}")
+        print(f"  {'-' * 68}")
+        counts = " -> ".join(str(m.exceptions) for m in result.months)
+        print(f"  exception count by close   {counts}")
+        if not report.items:
+            print("  no standing questions arose.")
+            continue
+        for item in report.items:
+            flag = "  STALE" if item.is_stale else ""
+            print(f"    {item.line()}{flag}")
+
+    print(f"\n  {'-' * 68}")
+    print("  VERDICT")
+    print(f"  {'-' * 68}")
+    learned_report = runs[0][2]
+    for line in textwrap.wrap(learned_report.verdict(), width=68,
+                              initial_indent="  ", subsequent_indent="  "):
+        print(line)
+    print("")
+    print("  The disabled run is the control. If the falling exception count")
+    print("  were an artefact of the data rather than the loop, both columns")
+    print("  above would look the same - and the standing question that gets")
+    print("  asked once with learning would get asked every close without it.")
+    print(f"  resolver: {client_name}")
+    print(BAR)
+
+
 def cmd_forensics(args) -> None:
     """First-digit analysis: does this population look lived, or authored?"""
     from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
@@ -1245,6 +1316,11 @@ def main(argv: list[str] | None = None) -> int:
     mt.add_argument("--aggregate-floor", default="5000.00",
                     help="chase a class of small items if it totals this much")
     mt.set_defaults(func=cmd_materiality)
+
+    ag = sub.add_parser("aging", parents=[shared],
+                        help="is the queue shrinking, or the same items every month?")
+    ag.add_argument("--months", type=int, default=6)
+    ag.set_defaults(func=cmd_aging)
 
     fx = sub.add_parser("forensics", parents=[shared],
                         help="first-digit analysis: lived amounts, or authored?")

@@ -133,6 +133,12 @@ the engine do when nothing is wrong? On a clean period (`reconcile --clean`) it
 finds nothing, escalates nothing, and calls no model. An engine that manufactures
 work on a quiet month spends human attention no metric here would charge it for.
 
+**The queue is aged, not just counted.** A falling exception count is
+compatible with a stuck queue, so exceptions get an identity that survives the
+period and are checked for recurrence. Running the same six closes with learning
+disabled is the control: with the loop the rate-card question is asked once, and
+without it every close. A test asserts the two runs must disagree.
+
 **Calibration, not just accuracy.** Stated confidence is compared against
 observed hit rate, and the auto-clear threshold is derived from that curve rather
 than picked. Brier skill is reported next to AUC because skill is sensitive to
@@ -232,8 +238,9 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 | `forensics.py` | Benford screening with a derived threshold |
 | `cashflow.py` | The cash position |
 | `materiality.py` | What deserves a person, and the aggregation rule |
+| `aging.py` | Exception identity across closes, and the stale check |
 | `report.py` | The self-contained HTML close package |
-| `tests/` | 149 invariants, organised by the claim each one guards |
+| `tests/` | 154 invariants, organised by the claim each one guards |
 
 The test suite is organised by **claim**, not by module: each section guards a
 sentence the writeup makes, so a failure means the writeup has become false.
