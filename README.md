@@ -19,6 +19,60 @@ what it could not resolve. **Every exception a human answers is compiled into a
 typed, regression-tested rule — so it calls the model less every month while
 getting more accurate.**
 
+### Start with the number that argues against this project
+
+This is an AI buildathon entry whose own ablation says the AI is not earning its
+place. That is the first thing you should see, not the last:
+
+```bash
+python -m taper.cli ablate --seed 99
+```
+
+```
+                    deterministic     + model     delta
+precision                   1.000       1.000    +0.000
+recall                      0.928       0.928    +0.000
+match rate                  0.778       0.778    +0.000
+exceptions left                10          10        +0
+llm calls                       0          10
+
+VERDICT: the model added nothing measurable on this run. On this data the
+deterministic layers are sufficient and layer 3 should be disabled.
+```
+
+I could have deleted that command. Three reasons it leads instead.
+
+**It is the thesis, not a bug.** The deterministic layers were built to make the
+model unnecessary. An ablation showing +0.000 is that design working — and the
+only way to say so honestly is to measure the model's contribution and report it
+even when the answer is zero. A system that cannot tell you its AI is useless
+also cannot tell you when it is essential.
+
+**What the model actually did is the finding.** The block above is the offline
+resolver; [the same ablation against a real local model](#layer-3-on-a-local-model--the-ablation-in-full)
+(qwen2.5:14b, 13 calls) is where it gets interesting. Five calls were honest
+declines. The other **eight were confabulations** — adjustments of ₹1,123,
+₹511.60, ₹98.12 proposed against gaps of forty to seventy thousand.
+Plausible-looking numbers that explain nothing.
+
+**All eight were refused by `verify_proposal()`**, which re-derives every claim
+from the source amounts in code the model never touches. So the honest summary
+is not "the AI did nothing". It is *the model tried to put wrong numbers in the
+books eight times and the architecture stopped it eight times, and precision
+never left 1.000.* That is a load-bearing result about where a language model
+belongs near money — and you only get it by measuring the thing you hoped would
+work.
+
+**It is a claim about this data, not about models.** The tested model is a local
+qwen2.5:14b, because there is no API key here and the writeup will not pretend
+otherwise. A stronger model may well clear the bar; the ablation is the
+instrument that would say so, and it is wired to Anthropic, Ollama, or any
+OpenAI-compatible endpoint without a code change.
+
+**The taper is what happens once you accept this.** If the expensive layer earns
+little, the correct engineering response is to need it less every month — which
+is the rest of this README.
+
 ```bash
 python -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"
 ```
@@ -429,11 +483,13 @@ The round trip is the proof both work: exporting a period, reading it back and
 reconciling reaches **the identical digest** — if the CSV path lost a field or
 dropped precision on an amount, it would diverge.
 
-### Layer 3 on a local model — and the ablation saying it did not help
+### Layer 3 on a local model — the ablation in full
 
-Layer 3 is a swappable component, and this is the proof rather than the claim.
-The same prompt, the same exception queue and the same verification gate run
-against Anthropic, **Ollama on a laptop**, or any OpenAI-compatible endpoint:
+The headline version of this is [at the top](#start-with-the-number-that-argues-against-this-project);
+here is the run it came from. Layer 3 is a swappable component, and this is the
+proof rather than the claim: the same prompt, the same exception queue and the
+same verification gate run against Anthropic, **Ollama on a laptop**, or any
+OpenAI-compatible endpoint:
 
 ```bash
 python -m taper.cli --llm ollama --llm-model qwen2.5:14b reconcile --seed 99
