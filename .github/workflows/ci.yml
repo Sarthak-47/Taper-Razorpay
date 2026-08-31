@@ -60,6 +60,9 @@ jobs:
       - name: Smoke - materiality
         run: python -m taper.cli --no-llm materiality --seed 99 --batches 40
 
+      - name: Smoke - forward cash
+        run: python -m taper.cli --no-llm forecast --seed 99 --batches 40
+
       - name: Smoke - cash position
         run: python -m taper.cli --no-llm cash --seed 99
 

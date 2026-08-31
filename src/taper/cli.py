@@ -787,6 +787,131 @@ def cmd_aging(args) -> None:
     print(BAR)
 
 
+def cmd_forecast(args) -> None:
+    """Forward cash: when the money that is owed will actually land."""
+    from .forecast import EXPECTED_COVERAGE, backtest, build
+
+    case = generate(n_batches=args.batches, seed=args.seed)
+    cfg, client_name = _client_and_config(args)
+    _warn_mock(args)
+    result = reconcile(case.bundle, config=cfg)
+
+    fc = build(result, case.bundle, horizon_days=args.horizon)
+
+    print(BAR)
+    print(f"  FORWARD CASH - {args.horizon} days from {fc.as_of}  (seed {args.seed})")
+    print(BAR)
+    print("  The cash position says what the merchant has. This says what they")
+    print("  will have, and on which day - which is the question that decides")
+    print("  whether payroll clears.")
+    print("")
+    print("  The model is one fact the reconciler already produces for free:")
+    print("  every matched batch carries the date the gateway settled it and")
+    print("  the date the bank credited it. The gap between them is measured,")
+    print(f"  not assumed. {fc.lag.describe()}.")
+
+    if fc.overdue:
+        print(f"\n  {'-' * 68}")
+        print("  OVERDUE - past the slowest arrival ever observed")
+        print(f"  {'-' * 68}")
+        print("  Kept off the curve deliberately. A batch settled in June whose")
+        print("  slowest observed arrival was July is not cash arriving in")
+        print("  October - it is a batch nobody chased, and forecasting it as")
+        print("  income puts money into a plan that has no reason to show up.")
+        print("")
+        print(f"  {'batch':<16}{'amount':>16}{'settled':>13}{'due by':>13}{'late':>8}")
+        for arrival in fc.overdue[:8]:
+            print(f"  {arrival.batch_id:<16}{'Rs.' + format(arrival.amount, ',.0f'):>16}"
+                  f"{arrival.settled_on.isoformat():>13}"
+                  f"{arrival.latest.isoformat():>13}"
+                  f"{str(fc.days_overdue(arrival)) + 'd':>8}")
+        if len(fc.overdue) > 8:
+            print(f"  ... and {len(fc.overdue) - 8} more")
+        print("")
+        print(f"  Rs.{fc.overdue_total:,.2f} owed and late. That is a collections")
+        print("  problem rather than a cash-flow one, and it leads the forward")
+        print("  view because it is the money least likely to arrive at all.")
+
+    if not fc.arrivals:
+        print(f"\n  {'-' * 68}")
+        print("  VERDICT")
+        print(f"  {'-' * 68}")
+        for line in textwrap.wrap(fc.verdict(), width=68,
+                                  initial_indent="  ", subsequent_indent="  "):
+            print(line)
+        print(BAR)
+        return
+
+    print(f"\n  {'-' * 68}")
+    print("  EXPECTED ARRIVALS")
+    print(f"  {'-' * 68}")
+    print(f"  {'day':<14}{'amount':>18}{'batches':>10}   running total")
+    running = Money("0.00")
+    for day, amount, count in fc.by_day():
+        if not count:
+            continue
+        running += amount
+        print(f"  {day.isoformat():<14}{'Rs.' + format(amount, ',.2f'):>18}"
+              f"{count:>10}   Rs.{running:,.2f}")
+
+    print(f"\n  {'-' * 68}")
+    print("  THE BAND, NOT THE NUMBER")
+    print(f"  {'-' * 68}")
+    print(f"  {'batch':<16}{'amount':>16}{'earliest':>13}{'expected':>13}{'latest':>13}")
+    for arrival in fc.arrivals[:8]:
+        print(f"  {arrival.batch_id:<16}{'Rs.' + format(arrival.amount, ',.0f'):>16}"
+              f"{arrival.earliest.isoformat():>13}{arrival.expected.isoformat():>13}"
+              f"{arrival.latest.isoformat():>13}")
+    if len(fc.arrivals) > 8:
+        print(f"  ... and {len(fc.arrivals) - 8} more")
+    print("")
+    print("  A single date would imply a confidence nothing here has earned.")
+    print("  Lag varies, so the arrival is a range drawn from what this")
+    print("  merchant's banks have actually done.")
+
+    if fc.unscheduled:
+        print(f"\n  {'-' * 68}")
+        print("  REAL MONEY, DELIBERATELY NOT ON THE CURVE")
+        print(f"  {'-' * 68}")
+        for item in fc.unscheduled:
+            print(f"  {item.label:<32}Rs.{item.amount:>14,.2f}  ({item.count})")
+            for line in textwrap.wrap(item.why, width=64,
+                                      initial_indent="      ",
+                                      subsequent_indent="      "):
+                print(line)
+        print("")
+        print(f"  Rs.{fc.unscheduled_total:,.2f} in total. Smearing it across the")
+        print("  horizon would make the forecast look better and be worse: none")
+        print("  of it has a knowable arrival date, so none of it gets one.")
+
+    bt = backtest(result, case.bundle)
+    print(f"\n  {'-' * 68}")
+    print("  BACKTEST - the part that makes this a forecast, not a chart")
+    print(f"  {'-' * 68}")
+    print("  Fitted on the earliest batches, tested on the later ones. Split by")
+    print("  date rather than at random, because that is the only split that")
+    print("  matches how a forecast is used - you predict forward from what you")
+    print("  have seen, never from a sample containing the future.")
+    print("")
+    for line in textwrap.wrap(bt.verdict(), width=68,
+                              initial_indent="  ", subsequent_indent="  "):
+        print(line)
+    if bt.n_tested:
+        print("")
+        print(f"  A p10-p90 band should hold about {EXPECTED_COVERAGE:.0%} of outcomes.")
+        print("  Reporting the measured coverage next to the claimed one is what")
+        print("  stops a narrow band passing for an accurate one.")
+
+    print(f"\n  {'-' * 68}")
+    print("  VERDICT")
+    print(f"  {'-' * 68}")
+    for line in textwrap.wrap(fc.verdict(), width=68,
+                              initial_indent="  ", subsequent_indent="  "):
+        print(line)
+    print(f"  resolver: {client_name}")
+    print(BAR)
+
+
 def cmd_forensics(args) -> None:
     """First-digit analysis: does this population look lived, or authored?"""
     from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
@@ -1368,6 +1493,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="is the queue shrinking, or the same items every month?")
     ag.add_argument("--months", type=int, default=6)
     ag.set_defaults(func=cmd_aging)
+
+    fo = sub.add_parser("forecast", parents=[shared],
+                        help="forward cash: when the money owed will actually land")
+    fo.add_argument("--seed", type=int, default=99)
+    fo.add_argument("--horizon", type=int, default=14)
+    fo.set_defaults(func=cmd_forecast)
 
     fx = sub.add_parser("forensics", parents=[shared],
                         help="first-digit analysis: lived amounts, or authored?")

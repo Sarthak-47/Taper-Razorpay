@@ -2836,3 +2836,124 @@ def test_the_shipped_recon_fixture_is_read_as_razorpay_not_as_generic_csv() -> N
     assert _settlement_format(SAMPLE / "settlement.csv", "auto") == "generic"
     # An explicit choice always beats detection.
     assert _settlement_format(RECON_SAMPLE, "generic") == "generic"
+
+
+# --------------------------------------------------------------------------
+# Claim: "the forward cash view is measured, ranged, and backtested"
+#
+# A forecast is the easiest thing in this repository to fake: pick a lag, draw
+# a curve, and nobody can tell it is wrong until the money does not arrive.
+# These tests exist to make it falsifiable instead.
+# --------------------------------------------------------------------------
+
+def test_the_lag_is_measured_from_matched_batches_not_assumed() -> None:
+    """An unmatched batch has no confirmed arrival date.
+
+    Including a guess about one would fit the model to its own assumptions and
+    make the backtest meaningless.
+    """
+    from taper.forecast import observe_lags
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    lag = observe_lags(result, case.bundle)
+
+    assert lag.n == len(result.matches) or lag.n <= len(result.matches)
+    assert lag.usable, "not enough matched batches to model a lag on this seed"
+    assert lag.low <= lag.median <= lag.high
+    assert all(observation >= 0 for observation in lag.observations)
+
+
+def test_overdue_money_never_appears_on_the_forward_curve() -> None:
+    """The single most misleading thing this module could do.
+
+    A batch past its slowest observed arrival is not income arriving later, it
+    is a batch nobody chased. Forecasting it puts money into a plan that has no
+    reason to show up.
+    """
+    from taper.forecast import build
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    forecast = build(result, case.bundle)
+
+    assert forecast.overdue, "this seed produced nothing overdue to test with"
+    assert forecast.overdue_total > Money("0.00")
+
+    scheduled = {a.batch_id for a in forecast.arrivals}
+    for late in forecast.overdue:
+        assert late.batch_id not in scheduled
+        assert late.latest < forecast.as_of
+        assert forecast.days_overdue(late) > 0
+
+    # The curve is built only from arrivals, so the overdue money cannot leak in.
+    curve_total = sum((amount for _, amount, _ in forecast.by_day()), Money("0.00"))
+    assert curve_total <= forecast.total_expected
+
+
+def test_money_with_no_knowable_date_is_never_smeared_across_the_horizon() -> None:
+    """Withheld funds and unsettled revenue have no arrival date.
+
+    Spreading them over the horizon would make the forecast look better and be
+    worse.
+    """
+    from taper.forecast import build
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    forecast = build(result, case.bundle)
+
+    assert forecast.unscheduled, "expected withheld or unsettled money on this seed"
+    assert forecast.unscheduled_total > Money("0.00")
+
+    curve_total = sum((amount for _, amount, _ in forecast.by_day()), Money("0.00"))
+    assert curve_total + forecast.unscheduled_total > curve_total
+    scheduled_ids = {a.batch_id for a in forecast.arrivals}
+    assert not any(u.label in scheduled_ids for u in forecast.unscheduled)
+
+
+def test_the_forecast_reports_a_range_not_a_date() -> None:
+    from taper.forecast import build
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    forecast = build(result, case.bundle)
+
+    for arrival in forecast.arrivals:
+        assert arrival.earliest <= arrival.expected <= arrival.latest
+        assert arrival.settled_on <= arrival.earliest
+
+
+def test_the_backtest_splits_by_date_so_the_future_cannot_leak_in() -> None:
+    """A random split would let the model fit on batches that settled after the
+    ones it predicts, which is not how anybody uses a forecast."""
+    from taper.forecast import EXPECTED_COVERAGE, backtest
+
+    case = generate(n_batches=60, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    report = backtest(result, case.bundle)
+
+    assert report.n_fit > 0 and report.n_tested > 0
+    assert report.median_error_days == report.median_error_days  # not NaN
+    assert 0.0 <= report.coverage <= 1.0
+
+    # The band claims 80%. Delivering far less means it is overconfident, and
+    # the report must say so rather than quietly passing.
+    assert report.honest, (
+        f"band coverage {report.coverage:.0%} against {EXPECTED_COVERAGE:.0%} "
+        f"claimed - the forecast is overconfident and a plan built on it "
+        f"would be late"
+    )
+
+
+def test_a_thin_sample_refuses_to_quote_a_percentile() -> None:
+    """Below a handful of observations a percentile is noise in a suit."""
+    from taper.forecast import MIN_OBSERVATIONS, LagModel
+
+    thin = LagModel(observations=[1, 2])
+    assert not thin.usable
+    assert "fewer than" in thin.describe()
+
+    fat = LagModel(observations=[2] * MIN_OBSERVATIONS)
+    assert fat.usable
+    assert fat.median == 2

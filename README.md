@@ -106,6 +106,7 @@ Four more things worth thirty seconds each:
 | `taper reconcile --clean` | The negative control — a period where nothing is wrong. It finds nothing, escalates nothing, calls no model |
 | `taper aging` | Is the queue shrinking, or the same items every month? The control that makes the taper falsifiable |
 | `taper materiality` | Which findings deserve a person — and the aggregation rule that stops a floor from hiding a pattern |
+| `taper forecast` | Forward cash — when the money owed will land, as a backtested range, with overdue money kept off the curve |
 | `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
 | `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
@@ -119,6 +120,62 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives — one self-contained HTML file, sortable and filterable, that still reads with JavaScript off |
+
+---
+
+## Forward cash
+
+The [cash position](#the-cash-position) says what the merchant *has*. This says
+what they will have and on which day — the question that decides whether payroll
+clears. The track brief names a forward cash forecaster as one of its example
+directions, and a forecast is the easiest thing in this repository to fake: pick
+a lag, draw a curve, and nobody can tell it is wrong until the money fails to
+arrive.
+
+```bash
+python -m taper.cli --no-llm forecast --seed 99 --batches 60
+```
+
+**The model is one fact the reconciler already produces for free.** Every matched
+batch carries the date the gateway settled it and the date the bank credited it.
+The gap between them is a *measurement*, not an assumption — 51 of them on this
+seed, giving T+2 typical and T+1 to T+3 across the band.
+
+Three commitments hold it up.
+
+**It is a range, not a number.** A single date implies confidence nothing here
+has earned, so arrivals are p10/p50/p90 from the observed distribution. Below
+eight observations it refuses to quote a percentile at all and says why.
+
+**It is backtested, and the backtest can fail.** Fit on the earliest batches,
+predict the later ones — split by *date*, because that is the only split matching
+how a forecast is used. You predict forward from what you have seen, never from a
+sample containing the future.
+
+```
+Fitted on 30 batch(es), tested on 21. Median error 1.0 day(s).
+The p10-p90 band held 90% of outcomes against 80% claimed.
+```
+
+A p10–p90 band should hold ~80%. Reporting measured coverage beside the claimed
+figure is what stops a narrow band passing for an accurate one, and a test fails
+the build if coverage drops far below what the band promises.
+
+**Overdue money is not forecast.** This is the one that matters most:
+
+```
+OVERDUE - past the slowest arrival ever observed
+  setl_99_005    Rs.282,193   settled 2026-06-11   due by 2026-06-14   105d late
+  ...
+  Rs.3,400,019.96 owed and late.
+```
+
+A batch settled in June whose slowest *observed* arrival was July is not cash
+arriving in October — it is a batch nobody chased. Putting it on the curve would
+be the single most misleading thing this module could do, so ₹3.4M sits in a
+collections bucket while only ₹398k reaches the forward view. Withheld funds and
+unsettled revenue are excluded for the same reason: neither has a knowable
+arrival date, so neither gets smeared across the horizon to flatter the total.
 
 ---
 
@@ -365,7 +422,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**166 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**172 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -584,7 +641,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **166 tests green, 18 CLI commands**, no API key required.
+Running end-to-end: **172 tests green, 19 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
