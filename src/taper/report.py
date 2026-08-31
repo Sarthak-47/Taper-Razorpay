@@ -4,6 +4,14 @@ Deliberately *not* a web app. This is a single self-contained HTML file with no
 server, no framework, no external assets and no build step - the same artifact a
 finance team gets emailed at month end. It opens from disk and it prints.
 
+It is interactive anyway. Sortable columns, a filter on the long tables, a
+theme override and a nav that tracks the current section all live in one inline
+script at the bottom, and all of it is *progressive enhancement*: every number
+is in the HTML before a line of it runs, and a test asserts the whole report
+still reads with the script stripped out. That constraint is what separates this
+from a dashboard - a served app would trade "opens from disk in eight years" for
+conveniences that can be had without giving anything up.
+
 A reconciliation tool's real output is a report somebody signs off on, so the
 report is the product surface. Charts are hand-rolled inline SVG for the same
 reason the runtime has no dependencies: a reviewer must be able to clone the
@@ -29,6 +37,175 @@ from .models import DefectClass, Money
 # Colours live in CSS custom properties, not here, so the document can follow
 # the reader's light/dark preference. SVG uses classes rather than presentation
 # attributes because `fill="var(--x)"` is not reliably supported on those.
+
+SCRIPT = r"""
+<script>
+/* Progressive enhancement only. Nothing below creates content - it makes
+   content that is already in the page easier to work through. If this script
+   fails or is blocked, the report is exactly the document it always was, which
+   is why none of the numbers live in here. */
+(function () {
+  "use strict";
+
+  /* Cells are written for a reader, not a parser: "Rs.1,268,262 (32%)",
+     "77.8%", "14 x unrecorded_adjustment". So the number is read off the FRONT
+     of the cell rather than by requiring the whole cell to be numeric - an
+     earlier version demanded a full match, found none, and silently fell back
+     to comparing "Rs.1,268,262" against "Rs.13,435" as strings. It looked like
+     it worked, which is the worst way for a sort to be wrong. */
+  function asNumber(text) {
+    var t = String(text).trim();
+    if (!t) return null;
+    /* ISO dates already sort correctly as text, and parsing one would compare
+       the year alone. */
+    if (/^\d{4}-\d{2}(-\d{2})?$/.test(t)) return null;
+    var m = t.match(/^(?:Rs\.?|₹)?\s*(-?[\d,]+(?:\.\d+)?)\s*%?/);
+    if (!m) return null;
+    var n = parseFloat(m[1].replace(/,/g, ""));
+    return isNaN(n) ? null : n;
+  }
+
+  /* ---- sortable columns -------------------------------------------------
+     A controller reading a findings table wants it by size, and the server
+     cannot know which column that is. Sorting is a reading aid, so it is done
+     here rather than baked into the generated order. */
+  function makeSortable(table) {
+    var head = table.tHead && table.tHead.rows[0];
+    var body = table.tBodies[0];
+    if (!head || !body || body.rows.length < 3) return;
+
+    Array.prototype.forEach.call(head.cells, function (th, index) {
+      th.classList.add("sortable");
+      th.tabIndex = 0;
+      th.setAttribute("role", "button");
+      th.setAttribute("aria-label", "Sort by " + (th.textContent || "column"));
+
+      function sort() {
+        var descending = !th.classList.contains("desc");
+        Array.prototype.forEach.call(head.cells, function (other) {
+          other.classList.remove("asc", "desc");
+        });
+        th.classList.add(descending ? "desc" : "asc");
+
+        var rows = Array.prototype.slice.call(body.rows);
+        /* A totals row belongs at the bottom whatever the sort says. */
+        var totals = rows.filter(function (r) { return r.className.indexOf("total") > -1; });
+        rows = rows.filter(function (r) { return totals.indexOf(r) === -1; });
+
+        rows.sort(function (a, b) {
+          var x = (a.cells[index] || {}).textContent || "";
+          var y = (b.cells[index] || {}).textContent || "";
+          var nx = asNumber(x), ny = asNumber(y);
+          var cmp = (nx !== null && ny !== null)
+            ? nx - ny
+            : x.trim().localeCompare(y.trim());
+          return descending ? -cmp : cmp;
+        });
+        rows.concat(totals).forEach(function (r) { body.appendChild(r); });
+      }
+
+      th.addEventListener("click", sort);
+      th.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sort(); }
+      });
+    });
+  }
+
+  /* ---- filter ------------------------------------------------------------
+     Only on tables long enough to be worth searching. Below that a filter box
+     is furniture. */
+  function addFilter(table) {
+    var body = table.tBodies[0];
+    if (!body || body.rows.length < 8) return;
+
+    var wrap = table.closest(".tablewrap") || table;
+    var tools = document.createElement("div");
+    tools.className = "tools";
+
+    var input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "Filter " + body.rows.length + " rows\u2026";
+    input.setAttribute("aria-label", "Filter table rows");
+
+    var count = document.createElement("span");
+    count.className = "count";
+
+    tools.appendChild(input);
+    tools.appendChild(count);
+    wrap.parentNode.insertBefore(tools, wrap);
+
+    input.addEventListener("input", function () {
+      var needle = input.value.toLowerCase().trim();
+      var shown = 0;
+      Array.prototype.forEach.call(body.rows, function (row) {
+        var hit = !needle || row.textContent.toLowerCase().indexOf(needle) > -1;
+        row.classList.toggle("hidden", !hit);
+        if (hit) shown++;
+      });
+      count.textContent = needle
+        ? shown + " of " + body.rows.length + (shown ? "" : " \u2014 nothing matches")
+        : "";
+    });
+  }
+
+  /* ---- which section am I in -------------------------------------------
+     The report is long and a reader loses their place in it. */
+  function scrollSpy() {
+    var links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+    if (!links.length) return;
+    var targets = links.map(function (a) {
+      return document.getElementById(a.getAttribute("href").slice(1));
+    });
+
+    function mark() {
+      var best = 0;
+      targets.forEach(function (el, i) {
+        if (el && el.getBoundingClientRect().top <= 90) best = i;
+      });
+      links.forEach(function (a, i) { a.classList.toggle("here", i === best); });
+    }
+    addEventListener("scroll", mark, { passive: true });
+    mark();
+  }
+
+  /* ---- theme ------------------------------------------------------------
+     The page already follows the reader's system setting; this overrides it
+     for the case where a projector or a shared screen disagrees with the
+     laptop it is mirroring. */
+  function themeToggle() {
+    var button = document.createElement("button");
+    button.className = "themer";
+    button.type = "button";
+    var stored = null;
+    try { stored = localStorage.getItem("taper-theme"); } catch (e) {}
+    if (stored) document.documentElement.setAttribute("data-theme", stored);
+
+    label.isDark = function () {
+      var set = document.documentElement.getAttribute("data-theme");
+      if (set) return set === "dark";
+      return matchMedia("(prefers-color-scheme: dark)").matches;
+    };
+    function label() { button.textContent = label.isDark() ? "light" : "dark"; }
+    button.addEventListener("click", function () {
+      var next = label.isDark() ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try { localStorage.setItem("taper-theme", next); } catch (e) {}
+      label();
+    });
+    label();
+    document.body.appendChild(button);
+  }
+
+  var tables = document.querySelectorAll("table");
+  Array.prototype.forEach.call(tables, function (t) {
+    try { makeSortable(t); addFilter(t); } catch (e) {}
+  });
+  try { scrollSpy(); } catch (e) {}
+  try { themeToggle(); } catch (e) {}
+})();
+</script>
+"""
+
 
 def _esc(v: Any) -> str:
     return html.escape(str(v))
@@ -254,13 +431,26 @@ CSS = """
   --warn-bg:#fdf3e0; --err-bg:#fdeceb;
   --l0:#2f4f4f; --l1:#5c7f76;
 }
+/* Three states, not two. The system preference is the default and stamps
+   nothing on the document, so the media query has to carry it - but an explicit
+   choice from the toggle must beat the OS in BOTH directions, which is why the
+   dark palette is declared twice and the media query is guarded against an
+   explicit light. Without the guard the toggle appears to work and silently
+   does nothing on a machine set to dark, which is exactly how it shipped for
+   about ten minutes. */
 @media (prefers-color-scheme: dark){
-  :root{
+  :root:not([data-theme="light"]){
     --paper:#16161a; --raise:#1e1e24; --ink:#ececec; --muted:#9a9a9a;
     --line:#32323a; --accent:#e0a94b; --good:#59b98c; --bad:#e0705e;
     --warn-bg:#2a2317; --err-bg:#2c1c1a;
     --l0:#6e9a9a; --l1:#7fae9f;
   }
+}
+:root[data-theme="dark"]{
+  --paper:#16161a; --raise:#1e1e24; --ink:#ececec; --muted:#9a9a9a;
+  --line:#32323a; --accent:#e0a94b; --good:#59b98c; --bad:#e0705e;
+  --warn-bg:#2a2317; --err-bg:#2c1c1a;
+  --l0:#6e9a9a; --l1:#7fae9f;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);
@@ -302,6 +492,44 @@ tr.total td{font-weight:600;border-top:2px solid var(--ink)}
 .toc a:hover{color:var(--accent);border-bottom-color:var(--accent)}
 h3.sub{font-size:13px;text-transform:uppercase;letter-spacing:.07em}
 @media print{.toc{display:none}}
+/* --- interactive shell. Every rule here is progressive enhancement: with
+   scripting off the page renders exactly as it did before, and print drops
+   all of it. --- */
+/* --paper, not --bg. A sticky bar naming a token that does not exist falls back
+   to transparent, and the page scrolls underneath it: the nav and the KPI row
+   render on top of each other and the report looks broken at exactly the moment
+   a reader starts scrolling. */
+.toc{position:sticky;top:0;z-index:20;background:var(--paper);
+ padding:10px 0 9px;margin-bottom:10px;
+ border-bottom:1px solid var(--line);box-shadow:0 6px 12px -8px rgba(0,0,0,.45)}
+.toc a.here{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 8px}
+.tools input{
+ font:inherit;font-size:13px;padding:6px 10px;border:1px solid var(--line);
+ border-radius:4px;background:var(--raise);color:var(--ink);min-width:220px}
+.tools input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.tools .count{font-size:12px;color:var(--muted)}
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--accent)}
+/* Literal glyphs rather than CSS hex escapes. Written as "\\2195" these meet
+   Python's escape handling before CSS ever sees them, where \\21 is a valid
+   OCTAL escape and the 95 is not - so the stylesheet received a control
+   character followed by "95", and every column header read "GROUP <box>95".
+   The file is UTF-8; use the characters. */
+th.sortable::after{content:"↕";opacity:.32;margin-left:5px;font-size:11px}
+th.sortable.asc::after{content:"↑";opacity:1;color:var(--accent)}
+th.sortable.desc::after{content:"↓";opacity:1;color:var(--accent)}
+th.sortable:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+tr.hidden{display:none}
+.themer{
+ position:fixed;right:16px;bottom:16px;z-index:30;font:inherit;font-size:12px;
+ padding:8px 13px;border:1px solid var(--line);border-radius:20px;
+ background:var(--raise);color:var(--muted);cursor:pointer}
+.themer:hover{color:var(--accent);border-color:var(--accent)}
+.empty-note{font-size:13px;color:var(--muted);padding:8px 0}
+@media print{.tools,.themer{display:none}tr.hidden{display:table-row}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+
 footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
  color:var(--muted);font-size:12.5px}
 
@@ -962,7 +1190,7 @@ def render(
         "<footer>Taper — settlement reconciliation. Every figure is reproducible from "
         "the repository with no API key: <span class='mono'>python -m taper.cli report</span>. "
         "Findings are scored against injected ground truth, not sampled by hand."
-        "</footer></div></body></html>"
+        "</footer></div>" + SCRIPT + "</body></html>"
     )
 
     # Wrap every table so wide ones scroll inside their own box. Done once here

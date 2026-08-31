@@ -287,9 +287,47 @@ def test_report_is_self_contained() -> None:
     # on the network and must not exist.
     stripped = html.replace('xmlns="http://www.w3.org/2000/svg"', "")
 
-    for forbidden in ("http://", "https://", "<script", "cdn.", "<link", "@import"):
+    for forbidden in ("http://", "https://", "cdn.", "<link", "@import"):
         assert forbidden not in stripped, f"report references external resource: {forbidden}"
     assert "<svg" in html and "</html>" in html
+
+    # Scripting is allowed and fetching is not. The report carries an inline
+    # progressive-enhancement layer - sorting, filtering, a theme toggle - and
+    # an inline script is self-contained by definition. A script with a src is
+    # the thing this test exists to stop, so the rule is about the attribute
+    # rather than the tag: banning <script> outright would have been a proxy
+    # for the real constraint, and proxies drift away from what they stand for.
+    assert "<script src" not in stripped
+    assert "<script\nsrc" not in stripped
+    for fetcher in ("fetch(", "XMLHttpRequest", "importScripts", "WebSocket",
+                    "new Worker", "navigator.sendBeacon"):
+        assert fetcher not in stripped, f"report tries to reach the network: {fetcher}"
+
+
+def test_the_report_still_reports_with_scripting_off() -> None:
+    """Every number must survive with the script removed.
+
+    The interactive layer is a reading aid. If a figure only existed once
+    JavaScript ran, the report would stop being a document somebody can print,
+    email, or open in eight years - which is the whole reason it has no
+    dependencies.
+    """
+    import re as _re
+
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score
+    from taper.report import render
+
+    case = generate(n_batches=20, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    html = render(result, score(case, result, "mock:offline-heuristic"), case, "2026-06")
+    without = _re.sub(r"<script.*?</script>", "", html, flags=_re.S)
+
+    for section in ("Cash position", "Money found", "Worth chasing",
+                    "Accuracy against ground truth"):
+        assert section in without, f"{section} needs scripting to appear"
+    assert f"Rs.{result.findings[0].money_impact:,.2f}" in without or "Rs." in without
+    assert "<table" in without and "<svg" in without
 
 
 def test_report_warns_when_run_on_the_mock() -> None:
@@ -2500,3 +2538,86 @@ def test_one_close_cannot_age_a_question_twice() -> None:
     assert report.standing_total == 1
     assert report.items[0].months == [1, 2]
     assert report.items[0].consecutive == 2
+
+
+# --------------------------------------------------------------------------
+# Claim: "the interactive layer is an aid, and it is wired to real tokens"
+#
+# Every assertion below exists because the bug it describes shipped. A control
+# that renders and does nothing is worse than no control: it looks like a
+# feature during a demo and fails in front of whoever tries it.
+# --------------------------------------------------------------------------
+
+def _report_html() -> str:
+    from taper.engine.llm import MockClient
+    from taper.metrics.harness import score as _score
+    from taper.report import render
+
+    case = generate(n_batches=40, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=True), client=MockClient())
+    return render(result, _score(case, result, "mock"), case, "2026-06")
+
+
+def test_the_theme_toggle_can_actually_beat_the_operating_system() -> None:
+    """The button sets data-theme; the stylesheet has to listen to it.
+
+    It shipped setting an attribute no selector mentioned, so on a dark machine
+    the toggle changed nothing at all. Three states, not two: the OS default
+    stamps nothing and needs the media query, and an explicit choice must win in
+    *both* directions - which needs the dark palette declared twice and the
+    media query guarded against an explicit light.
+    """
+    css = _report_html()
+
+    assert ':root[data-theme="dark"]' in css, (
+        "no explicit-dark block: the toggle cannot force dark on a light machine"
+    )
+    assert ':root:not([data-theme="light"])' in css, (
+        "the dark media query is unguarded: the toggle cannot force light on a "
+        "dark machine"
+    )
+
+
+def test_the_sticky_nav_names_a_colour_that_exists() -> None:
+    """A sticky bar on an undefined token is transparent, and content scrolls
+    through it. The nav and the KPI row rendered on top of each other."""
+    import re as _re
+
+    css = _report_html()
+    match = _re.search(r"\.toc\{[^}]*background:var\((--[a-z-]+)\)", css)
+    assert match, "the sticky nav sets no background at all"
+
+    token = match.group(1)
+    assert f"{token}:#" in css, (
+        f"the nav is painted with {token}, which is never defined - it will "
+        "fall back to transparent"
+    )
+
+
+def test_the_sort_arrows_are_characters_not_escapes() -> None:
+    """Written as a CSS hex escape, "\2195" meets Python's escape handling
+    first, where \21 is valid octal. The stylesheet received a control
+    character and every column header read "GROUP <box>95"."""
+    css = _report_html()
+
+    assert "↕" in css and "↑" in css and "↓" in css
+    for control in ("\x11", "\x0f", "\x19"):
+        assert control not in css, "an octal escape leaked into the stylesheet"
+
+
+def test_sorting_reads_numbers_out_of_cells_written_for_people() -> None:
+    """Cells say "Rs.1,268,262 (32%)", not "1268262".
+
+    The first version required the whole cell to be numeric, found no match,
+    and silently fell back to comparing those strings lexicographically - so
+    Rs.1,268,262 sorted before Rs.13,435 and the table looked sorted.
+    """
+    html = _report_html()
+
+    assert "asNumber" in html
+    # The parser must anchor at the start and tolerate a trailing tail, rather
+    # than demanding a full-string match.
+    assert r"^(?:Rs\.?|₹)?" in html, "the number parser no longer anchors at the front"
+    assert "$/" not in html.split("function asNumber")[1].split("}")[0], (
+        "asNumber is demanding a full-cell match again"
+    )

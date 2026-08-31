@@ -201,6 +201,13 @@ policy.
 
 ## 8. Engineering choices
 
+**The report is the product surface, and it is one file.** Sortable columns, a
+filter, a theme override and a section tracker are an inline script at the
+bottom of the same document - progressive enhancement, so every number is in the
+HTML before it runs and a test asserts the report still reads with the script
+stripped. A served dashboard would have traded "opens from disk in eight years"
+for conveniences available without giving that up.
+
 **Zero runtime dependencies.** A reviewer clones the repo and reproduces every
 number without installing anything. The model client is optional; the shipped
 risk model is a hand-written logistic regression, chosen over scikit-learn on
@@ -240,7 +247,7 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 | `materiality.py` | What deserves a person, and the aggregation rule |
 | `aging.py` | Exception identity across closes, and the stale check |
 | `report.py` | The self-contained HTML close package |
-| `tests/` | 154 invariants, organised by the claim each one guards |
+| `tests/` | 159 invariants, organised by the claim each one guards |
 
 The test suite is organised by **claim**, not by module: each section guards a
 sentence the writeup makes, so a failure means the writeup has become false.

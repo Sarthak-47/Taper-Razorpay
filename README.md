@@ -117,7 +117,7 @@ Four more things worth thirty seconds each:
 | `taper --llm ollama reconcile` | Layer 3 against a **local model, no API key** — and an ablation that honestly reports it added nothing |
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
-| `taper report` | The close package a controller actually receives, as one self-contained HTML file |
+| `taper report` | The close package a controller actually receives — one self-contained HTML file, sortable and filterable, that still reads with JavaScript off |
 
 ---
 
@@ -315,7 +315,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**154 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**159 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -1043,7 +1043,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **154 tests green, 18 CLI commands**, no API key required.
+Running end-to-end: **159 tests green, 18 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
