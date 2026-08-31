@@ -8,6 +8,7 @@ Run: python -m pytest tests/ -v
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from taper.engine.results import Exception_
 from taper.engine.rules import ConfirmedCase, Rule, RuleStore
 from taper.generator import DefectRates, generate
 from taper.metrics.harness import score
-from taper.models import Money
+from taper.models import Money, TxnType
 
 SEEDS = [7, 99, 1234]
 
@@ -2708,3 +2709,130 @@ def test_every_link_between_the_documents_resolves() -> None:
                 broken.append(f"{src.name} -> {target} (no such heading)")
 
     assert not broken, "dead documentation links:\n  " + "\n  ".join(broken)
+
+
+# --------------------------------------------------------------------------
+# Claim: "it reads Razorpay's real settlement recon schema, not just its own"
+#
+# Field names and semantics come from the public API documentation at
+# https://razorpay.com/docs/api/settlements/fetch-recon/ . No real merchant
+# data is used anywhere in this project and none is needed: the schema is
+# public, and reading it correctly is a separate problem from having somebody's
+# transactions.
+# --------------------------------------------------------------------------
+
+RECON_SAMPLE = REPO / "data" / "sample" / "razorpay-recon.csv"
+
+
+def test_amounts_are_paise_and_the_engine_knows_it() -> None:
+    """The bug this adapter exists to prevent, and it is silent.
+
+    Razorpay states amounts in currency subunits: 150000 is Rs.1,500.00. Read
+    at face value the whole close is wrong by a factor of a hundred, with no
+    error and no warning - every total plausible, every total false.
+    """
+    from taper.adapters.razorpay import _paise
+
+    assert _paise("150000", "amount", 1) == Money("1500.00")
+    assert _paise("1", "amount", 1) == Money("0.01")
+    assert _paise("0", "amount", 1) == Money("0.00")
+    assert _paise("", "amount", 1) == Money("0.00")
+
+    # Exact, not floating point. 0.01 must be 0.01.
+    assert str(_paise("1", "amount", 1)) == "0.01"
+
+    # A fractional paisa means the file is already in rupees, and dividing
+    # again would be wrong by a hundred in the other direction.
+    with pytest.raises(ValueError, match="already be in rupees"):
+        _paise("1500.50", "amount", 1)
+
+
+def test_timestamps_are_epoch_seconds_read_in_utc() -> None:
+    """Local time moves a near-midnight settlement into the wrong close."""
+    from taper.adapters.razorpay import _epoch
+
+    # 2026-06-01T00:00:00Z
+    assert _epoch("1780272000", "settled_at", 1) == date(2026, 6, 1)
+    with pytest.raises(ValueError):
+        _epoch("2026-06-01", "settled_at", 1)
+
+
+def test_held_and_unsettled_rows_keep_their_meaning() -> None:
+    """A row can be in the recon report and not be money you have."""
+    from taper.adapters.razorpay import _row
+
+    base = {
+        "entity_id": "pay_1", "type": "payment", "amount": "100000",
+        "fee": "2000", "tax": "360", "settled_at": "1780272000",
+        "settlement_id": "setl_1", "settled": "true", "on_hold": "false",
+        "method": "upi",
+    }
+    assert _row(dict(base), 2).txn_type is TxnType.PAYMENT
+
+    held = _row({**base, "on_hold": "true"}, 2)
+    assert held.txn_type is TxnType.CHARGEBACK_HOLD, (
+        "money withheld against a dispute was read as money received"
+    )
+
+    unsettled = _row({**base, "settled": "false", "settlement_id": ""}, 2)
+    assert unsettled.settlement_batch_id == "UNSETTLED", (
+        "revenue that was never paid out was dropped instead of reported"
+    )
+
+    # A Route transfer is real and is not a payment.
+    assert _row({**base, "type": "transfer"}, 2).txn_type is TxnType.ADJUSTMENT
+    with pytest.raises(ValueError, match="unknown transaction type"):
+        _row({**base, "type": "wishful_thinking"}, 2)
+
+
+def test_the_same_close_through_razorpays_schema_hashes_identically() -> None:
+    """The round trip is the proof that neither direction lost anything.
+
+    If the subunit divisor were applied twice, or not at all, or a timestamp
+    landed on the wrong day, the reconciled close would differ - and the digest
+    covers conclusions rather than wording, so only a real change moves it.
+    """
+    import shutil
+
+    from taper.adapters.razorpay import load_recon, write_recon
+    from taper.attest import attest
+    from taper.models import SourceBundle
+
+    case = generate(n_batches=30, seed=99)
+    native = reconcile(case.bundle, config=RunConfig(use_llm=False))
+
+    out = REPO / "data" / ".recon-roundtrip"
+    shutil.rmtree(out, ignore_errors=True)
+    try:
+        path = write_recon(case.bundle.settlement, out / "recon.csv")
+        rows, report = load_recon(path)
+        assert report.ok, report.errors[:3]
+        assert report.loaded == len(case.bundle.settlement)
+
+        via_razorpay = reconcile(
+            SourceBundle(
+                ledger=case.bundle.ledger, settlement=rows,
+                bank=case.bundle.bank, period=case.bundle.period,
+            ),
+            config=RunConfig(use_llm=False),
+        )
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+    assert attest(via_razorpay).line() == attest(native).line()
+
+
+def test_the_shipped_recon_fixture_is_read_as_razorpay_not_as_generic_csv() -> None:
+    """Detection is by header, because getting it wrong is silent.
+
+    The generic loader would happily parse this file and report every amount a
+    hundred times too large, so the format has to be recognised rather than
+    assumed from a filename.
+    """
+    from taper.cli import _settlement_format
+
+    assert RECON_SAMPLE.is_file(), "the recon fixture is not in the repository"
+    assert _settlement_format(RECON_SAMPLE, "auto") == "razorpay"
+    assert _settlement_format(SAMPLE / "settlement.csv", "auto") == "generic"
+    # An explicit choice always beats detection.
+    assert _settlement_format(RECON_SAMPLE, "generic") == "generic"

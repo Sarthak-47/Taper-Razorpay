@@ -955,6 +955,28 @@ def cmd_export(args) -> None:
     print(BAR)
 
 
+def _settlement_format(path: Path, requested: str) -> str:
+    """Decide which schema a settlement file is in.
+
+    Detection is by header, not by filename, and it exists because the failure
+    it prevents is silent. Razorpay states amounts in paise, so reading a recon
+    export with the generic loader produces a close wrong by a factor of a
+    hundred with no error at all - every total plausible, every total false. An
+    explicit --format always wins; auto only claims razorpay when the header
+    carries fields nothing else uses.
+    """
+    if requested != "auto":
+        return requested
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            header = (handle.readline() or "").lower()
+    except OSError:
+        return "generic"
+    signature = {"entity_id", "settlement_utr", "on_hold"}
+    present = {name.strip() for name in header.split(",")}
+    return "razorpay" if len(signature & present) >= 2 else "generic"
+
+
 def cmd_ingest(args) -> None:
     """Reconcile three CSV files - the same engine, on data it did not invent."""
     from .attest import attest
@@ -990,13 +1012,38 @@ def cmd_ingest(args) -> None:
         print(BAR)
         raise SystemExit(2)
 
-    bundle, reports = load_bundle(Path(args.settlement), Path(args.bank), ledger)
+    fmt = _settlement_format(Path(args.settlement), getattr(args, "format", "auto"))
+    if fmt == "razorpay":
+        from .adapters.razorpay import load_recon
+        from .io import load_bank, load_ledger
+        from .models import SourceBundle
+
+        settlement_rows, s_report = load_recon(Path(args.settlement))
+        bank_rows, b_report = load_bank(Path(args.bank))
+        reports = {"settlement (razorpay recon)": s_report, "bank": b_report}
+        ledger_rows = []
+        if ledger is not None:
+            ledger_rows, l_report = load_ledger(ledger)
+            reports["ledger"] = l_report
+        period = (
+            f"{min(r.settled_on for r in settlement_rows):%Y-%m}"
+            if settlement_rows else ""
+        )
+        bundle = SourceBundle(
+            ledger=ledger_rows, settlement=settlement_rows,
+            bank=bank_rows, period=period,
+        )
+    else:
+        bundle, reports = load_bundle(Path(args.settlement), Path(args.bank), ledger)
 
     print(BAR)
     print("  INGEST - reconciling files from disk")
     print(BAR)
     for name, report in reports.items():
-        print(f"  {name:<12}{report.summary()}")
+        # Width from the longest label present, not a constant: the razorpay
+        # source names itself "settlement (razorpay recon)" and a fixed 12 ran
+        # the label straight into the row count.
+        print(f"  {name:<{max(len(n) for n in reports) + 2}}{report.summary()}")
         for err in report.errors[:5]:
             print(f"      rejected: {err}")
         if len(report.errors) > 5:
@@ -1347,6 +1394,10 @@ def main(argv: list[str] | None = None) -> int:
     ing.add_argument("--ledger")
     ing.add_argument("--persist-rules", action="store_true")
     ing.add_argument("--max-exceptions", type=int, default=8)
+    ing.add_argument(
+        "--format", choices=("auto", "generic", "razorpay"), default="auto",
+        help="settlement file schema; 'razorpay' reads the real recon export",
+    )
     ing.set_defaults(func=cmd_ingest)
 
     rt = sub.add_parser("redteam", parents=[shared],

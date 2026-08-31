@@ -41,3 +41,4 @@ data/.roundtrip/
 
 # Scratch clones used to verify the fresh-checkout experience
 judgetest/
+data/.recon-roundtrip/

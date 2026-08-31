@@ -25,3 +25,20 @@ else's settlement history.
 The defects in here are injected at declared rates and labelled, which is what
 lets [`taper reconcile`](../../src/taper/metrics/harness.py) report precision
 and recall against ground truth rather than against its own opinion.
+
+## The same period in Razorpay's real schema
+
+`razorpay-recon.csv` is the settlement side of this period expressed in the
+[settlement recon schema Razorpay actually publishes](https://razorpay.com/docs/api/settlements/fetch-recon/)
+— `entity_id`, `settlement_utr`, `on_hold`, amounts in paise, timestamps in Unix
+seconds.
+
+```bash
+python -m taper.cli ingest --settlement data/sample/razorpay-recon.csv     --bank data/sample/bank.csv --ledger data/sample/ledger.csv
+```
+
+It reconciles to the **same close digest** as `settlement.csv` above. The format
+is detected from the header rather than the filename, because the failure it
+prevents is silent: Razorpay states amounts in currency subunits, so reading a
+recon export with the generic loader produces a close wrong by a factor of a
+hundred with no error at all.

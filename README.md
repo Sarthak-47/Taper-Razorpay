@@ -111,6 +111,7 @@ Four more things worth thirty seconds each:
 | `taper risk` | Reviewing the riskiest 10% of batches catches **56%** of all escalations (5.6×) |
 | `taper forensics` | Benford first-digit analysis — does this population look **lived, or authored**? |
 | `taper risk --compare` | Why the shipped model has no dependencies — three measurements, not a preference |
+| `taper ingest --format razorpay` | Reads the settlement recon schema **Razorpay actually publishes** — paise, epochs, `on_hold` — to the same close digest |
 | `taper ingest` | Reconciles real CSV files — drifting headers, per-row error reporting, and a re-derivable close digest |
 | `taper resolve` | Teach the store what a human worked out — through the admission gate |
 | `taper doctor` | What this machine can run, and the exact command to type next |
@@ -118,6 +119,51 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives — one self-contained HTML file, sortable and filterable, that still reads with JavaScript off |
+
+---
+
+## It reads Razorpay's real settlement schema
+
+Everything else here reconciles data this repository invented, which is the
+fairest criticism of the project. So it also reads the shape Razorpay genuinely
+publishes — the [settlement recon report](https://razorpay.com/docs/api/settlements/fetch-recon/):
+`entity_id`, `settlement_id`, `settlement_utr`, `on_hold`, `settled`, `fee`,
+`tax`, `type`.
+
+```bash
+python -m taper.cli ingest --settlement data/sample/razorpay-recon.csv     --bank data/sample/bank.csv --ledger data/sample/ledger.csv
+```
+
+**Same period, same close digest** as the generic CSV — `taper-close-v1:520993d8d5a0`.
+That equality is the test: if the adapter lost a field or misplaced a decimal,
+the digest would move.
+
+Four things in that format would silently corrupt a close, and they are why this
+is an adapter rather than a column-name alias:
+
+**Amounts are in currency subunits.** `amount: 150000` is ₹1,500.00, not
+₹150,000. Point the generic loader at a recon export and every total comes out a
+hundred times too large — with no error, no warning, and every figure still
+plausible. That is the worst class of bug in a finance tool, so the conversion is
+exact integer paise over `Decimal("100")`, and a *fractional* paisa raises rather
+than silently dividing a rupee file again.
+
+**Timestamps are Unix epoch seconds**, read in UTC. Local time moves a
+near-midnight settlement into the wrong close.
+
+**`on_hold` and `settled` decide whether money exists.** A row can be in the
+recon report and not be in your bank. Both map onto defect classes this engine
+already reports — dropping them would turn money that has not arrived into money
+that has.
+
+**`type` includes `transfer`.** A Route movement to a linked account is real and
+is not a payment; it becomes an adjustment rather than being forced into a
+category that flatters the total.
+
+The format is detected from the *header*, not the filename, and `--format` always
+overrides. **No real merchant data is used anywhere in this project** — the
+schema is public, and reading it correctly is a different problem from having
+somebody's transactions.
 
 ---
 
@@ -319,7 +365,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**161 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**166 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -538,7 +584,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **161 tests green, 18 CLI commands**, no API key required.
+Running end-to-end: **166 tests green, 18 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
