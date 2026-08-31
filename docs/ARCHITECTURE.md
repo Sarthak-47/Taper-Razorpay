@@ -247,7 +247,7 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 | `materiality.py` | What deserves a person, and the aggregation rule |
 | `aging.py` | Exception identity across closes, and the stale check |
 | `report.py` | The self-contained HTML close package |
-| `tests/` | 159 invariants, organised by the claim each one guards |
+| `tests/` | 160 invariants, organised by the claim each one guards |
 
 The test suite is organised by **claim**, not by module: each section guards a
 sentence the writeup makes, so a failure means the writeup has become false.

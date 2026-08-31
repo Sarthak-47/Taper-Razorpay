@@ -2621,3 +2621,28 @@ def test_sorting_reads_numbers_out_of_cells_written_for_people() -> None:
     assert "$/" not in html.split("function asNumber")[1].split("}")[0], (
         "asNumber is demanding a full-cell match again"
     )
+
+
+def test_the_report_prints_light_even_after_the_toggle_says_dark() -> None:
+    """Dark ink on dark paper wastes toner and reads badly.
+
+    The print block forces a light palette, and it did so with a bare :root -
+    fine until the theme toggle introduced :root[data-theme="dark"], which is
+    more specific and quietly won. A reader who switched to dark and printed got
+    a black page.
+    """
+    css = _report_html()
+
+    # There are several @media print blocks; the one that matters is whichever
+    # repaints the palette. Find it by what it does, not by position.
+    palette = [
+        chunk for chunk in css.split("@media print{")[1:]
+        if "--paper:#fff" in chunk[:900]
+    ]
+    assert palette, "the report no longer forces a light palette for print"
+
+    printed = palette[0][:900]
+    assert ':root[data-theme="dark"]' in printed, (
+        "the print palette does not override an explicit dark theme, so a "
+        "reader who toggled dark will print dark ink on dark paper"
+    )

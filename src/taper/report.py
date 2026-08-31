@@ -460,8 +460,15 @@ h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
  margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .sub{color:var(--muted);margin:0 0 6px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+/* Four columns, not auto-fit. The gaps are drawn by letting the container's
+   --line background show through, which means a row that does not fill leaves a
+   solid block of line colour sitting there looking like a broken tile. auto-fit
+   chose five columns and every grid in this report holds 8, 4 or 4 - so every
+   one of them had a hole. Four divides all three exactly, and two does at the
+   narrow breakpoint. */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
  background:var(--line);border:1px solid var(--line);margin-top:24px}
+@media (max-width:640px){.kpis{grid-template-columns:repeat(2,1fr)}}
 .kpi{background:var(--raise);padding:16px 18px}
 .kpi .v{font-size:25px;font-weight:600;letter-spacing:-.02em}
 .kpi .l{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:3px}
@@ -469,6 +476,13 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--mute
 table{width:100%;border-collapse:collapse;font-size:14px}
 th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th:first-child,td:first-child{text-align:left}
+/* Prose columns wrap; figures never do. Blanket nowrap pushed three tables past
+   the page width and the column that got scrolled out of sight was "What it
+   means" - the reasoning, which is the part worth reading. Marked explicitly
+   rather than by reusing .muted, because some numeric cells are muted too and
+   left-aligning those would break the figure column. */
+th.note,td.note{white-space:normal;text-align:left;min-width:22ch;line-height:1.45}
+@media (max-width:720px){th.note,td.note{min-width:16ch}}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
 tbody tr:last-child td{border-bottom:none}
 tr.total td{font-weight:600;border-top:2px solid var(--ink)}
@@ -547,7 +561,15 @@ footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
 .l3{background:var(--accent)} rect.l3{fill:var(--accent)}
 
 @media print{
-  :root{
+  /* Every theme selector is listed, not just :root. Once the toggle introduced
+     :root[data-theme="dark"] - specificity (0,2,0) against this block's (0,1,0)
+     - a reader who switched to dark and hit print got dark ink on dark paper,
+     which is the exact thing this block exists to prevent. Matching specificity
+     and coming later in the sheet is what makes "print is always light" true
+     rather than merely intended. */
+  :root,
+  :root[data-theme="dark"],
+  :root[data-theme="light"]{
     --paper:#fff; --raise:#fff; --ink:#111; --muted:#555; --line:#ddd;
     --accent:#9a6a1f; --good:#1f5c43; --bad:#8c2f21;
   }
@@ -645,12 +667,12 @@ def cash_section(result: ReconResult, period: str) -> str:
                 f"<tr><td class='muted'>{_esc(title)}</td>"
                 f"<td>{_esc(line.label)}</td><td>{shown}</td>"
                 f"<td>{line.count}</td>"
-                f"<td class='muted'>{_esc(line.note)}</td></tr>"
+                f"<td class='note muted'>{_esc(line.note)}</td></tr>"
             )
     if rows:
         p.append(
             "<table><thead><tr><th>Group</th><th>Line</th><th>Amount</th>"
-            "<th>Count</th><th>What it means</th></tr></thead><tbody>"
+            "<th>Count</th><th class='note'>What it means</th></tr></thead><tbody>"
             + "".join(rows) + "</tbody></table>"
         )
 
@@ -719,7 +741,8 @@ def money_section(result: ReconResult) -> str:
 
     p = [f"<div class='chart'>{money_bars(with_money)}</div>"]
     p.append("<table><thead><tr><th>What was found</th><th>Count</th><th>Amount</th>"
-             "<th>What it means</th><th>Action</th></tr></thead><tbody>")
+             "<th class='note'>What it means</th>"
+         "<th class='note'>Action</th></tr></thead><tbody>")
     for dc, n, amount in with_money:
         meaning, action = DEFECT_MEANING.get(dc, ("", ""))
         share = amount / total if total else 0
@@ -727,8 +750,8 @@ def money_section(result: ReconResult) -> str:
             f"<tr><td>{_esc(dc.value)}</td><td>{n}</td>"
             f"<td><strong>Rs.{amount:,.0f}</strong> "
             f"<span class='muted'>({share:.0%})</span></td>"
-            f"<td class='muted'>{_esc(meaning)}</td>"
-            f"<td class='muted'>{_esc(action)}</td></tr>"
+            f"<td class='note muted'>{_esc(meaning)}</td>"
+            f"<td class='note muted'>{_esc(action)}</td></tr>"
         )
     p.append(
         f"<tr class='total'><td>Total identified</td>"
@@ -758,7 +781,8 @@ def learned_section(store) -> str:
             "<p class='muted'>Nothing learned yet — this is a cold start. Every "
             "recurring pattern below is currently being resolved from scratch.</p>"
         )
-    p = ["<table><thead><tr><th>Rule</th><th>Kind</th><th>What it encodes</th>"
+    p = ["<table><thead><tr><th>Rule</th><th>Kind</th>"
+         "<th class='note'>What it encodes</th>"
          "<th>Learned from</th><th>On</th></tr></thead><tbody>"]
     for r in store.rules:
         # The sentence first, the parameters under it. A reader checking whether
@@ -767,7 +791,7 @@ def learned_section(store) -> str:
         params = ", ".join(f"{k}={v}" for k, v in sorted(r.params.items()) if v not in (None, ""))
         p.append(
             f"<tr><td class='mono'>{_esc(r.rule_id)}</td><td>{_esc(r.kind)}</td>"
-            f"<td>{_esc(r.summary())}"
+            f"<td class='note'>{_esc(r.summary())}"
             f"<div class='mono muted small'>{_esc(params)}</div></td>"
             f"<td class='mono muted'>{_esc(r.origin_exception)}</td>"
             f"<td class='muted'>{_esc(r.learned_on)}</td></tr>"
