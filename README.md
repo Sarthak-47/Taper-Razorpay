@@ -106,6 +106,7 @@ Four more things worth thirty seconds each:
 | `taper reconcile --clean` | The negative control — a period where nothing is wrong. It finds nothing, escalates nothing, calls no model |
 | `taper aging` | Is the queue shrinking, or the same items every month? The control that makes the taper falsifiable |
 | `taper materiality` | Which findings deserve a person — and the aggregation rule that stops a floor from hiding a pattern |
+| `taper signoff` | The stopping rules — and each one refusing a close it should refuse |
 | `taper forecast` | Forward cash — when the money owed will land, as a backtested range, with overdue money kept off the curve |
 | `taper cash` | The position a CFO reads first — in the bank, withheld, owed each way, and what could not be placed |
 | `taper stress` | Under 6.6× ambiguity it matches *nothing* and escalates everything — **zero false findings at any level.** It fails safe, not wrong |
@@ -120,6 +121,70 @@ Four more things worth thirty seconds each:
 | `taper redteam` | A prompt-injection payload in a bank narration — and proof a **fully compromised model** still moves nothing |
 | `taper drift` | A bank reprices mid-campaign — the engine names the rule that went stale, retires it, relearns |
 | `taper report` | The close package a controller actually receives — one self-contained HTML file, sortable and filterable, that still reads with JavaScript off |
+
+---
+
+## When it refuses to sign
+
+Everything else here decides what is *true* about a close. This decides whether
+the close is fit to be signed at all — which is the thing a controller is
+actually accountable for.
+
+**An engine that always produces a report produces one for a truncated bank
+statement too**, and it looks identical to a good close: a match rate, a findings
+table, an exception list. It is simply wrong, and nothing in it says so. A number
+that is always emitted carries no information about whether it should have been.
+
+```bash
+python -m taper.cli signoff --seed 99
+```
+
+```
+settlement file never arrived     DO NOT SIGN
+   !! source_present: settlement is empty
+   !! unattributed_money: Rs.16,344,577.29 (100.0%) tied to no batch
+
+bank statement truncated          DO NOT SIGN
+   !! match_rate_floor: 12.5% of batches matched
+
+wrong period exported             DO NOT SIGN
+   !! unattributed_money: Rs.14,573,970.55 (89.2%) tied to no batch
+```
+
+A close ends in one of three states — **SIGN**, **SIGN WITH CAVEATS**, or **DO
+NOT SIGN** — and a refused close carries that banner at the top of the HTML
+report, *above* the numbers, because from the KPI row down it looks exactly like
+a good one.
+
+### Two stops that change what the close does
+
+The model budget and the refusal streak are enforced inside the pipeline, not
+reported after the fact. A stopping rule that only ever appears in a summary is a
+comment with a threshold in it.
+
+| | model calls | exceptions |
+|---|---|---|
+| unbounded | 10 | 10 |
+| budget 0.2 / 100 records | **2** | 10 |
+| abandon after 2 refusals | **4** | 10 |
+
+Precision is unchanged in all three. **A stop costs recall and human time, never
+correctness** — items it holds back land on the exception list rather than being
+decided without evidence.
+
+### Why these thresholds
+
+Each was set against measured behaviour on healthy closes, not chosen because it
+sounded prudent — *a bound that never binds is decoration, and one that binds
+silently is worse.*
+
+The refusal streak is the clearest case, and it is in the repo because it went
+wrong first. At 5 consecutive refusals it fired on **perfectly healthy closes**
+and pulled month-one model calls from 1.12 to 0.78. That would have been worse
+than useless: the taper is a claim about *learning* reducing model calls, and a
+stop quietly truncating them would have taken the credit. Measured across eight
+seeds, the longest refusal run on a healthy close was 10 — so the default is 12,
+and a test fails the build if any default stop fires on a healthy close.
 
 ---
 
@@ -422,7 +487,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**172 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**181 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -641,7 +706,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **172 tests green, 19 CLI commands**, no API key required.
+Running end-to-end: **181 tests green, 20 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the

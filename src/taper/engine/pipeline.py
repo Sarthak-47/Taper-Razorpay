@@ -40,6 +40,32 @@ class RunConfig:
     llm_base_url: str | None = None
     llm_model: str | None = None
 
+    # ---- stopping rules -------------------------------------------------
+    # A bound that never binds is decoration, and a bound that binds silently
+    # is worse. Both of these change what the close does and both record that
+    # they did, so `taper signoff` can report it.
+    #
+    # The budget is generous on purpose: a normal close spends around 1.1 calls
+    # per 100 records, so 5.0 does not bind in ordinary running. It exists for
+    # the close that goes wrong - a corrupt file, a source in the wrong format -
+    # where the exception queue explodes and every item is sent to a model that
+    # cannot help with any of it.
+    max_llm_calls_per_100: float = 5.0
+    # Consecutive proposals refused by verify_proposal before layer 3 is
+    # abandoned for this close. A model wrong this many times running is not
+    # having a bad patch; it cannot do this close, and the remaining calls buy
+    # the same exception list at a price.
+    #
+    # Twelve because that is above what healthy closes actually do, measured
+    # rather than guessed. Across eight seeds the longest refusal run on a
+    # normal close was 10 - on this workload a model being refused repeatedly
+    # is its ordinary state, not a fault, which is the same finding the
+    # ablation reports. Set at 5 it fired on healthy closes and pulled month-one
+    # model calls from 1.12 to 0.78, which would have been worse than useless:
+    # the taper is a claim about learning, and a stop that quietly truncates
+    # calls would have taken credit for it.
+    max_consecutive_refusals: int = 12
+
 
 def reconcile(
     bundle: SourceBundle,
@@ -131,46 +157,106 @@ def reconcile(
         for exc in still_open
     ]
 
+    # --- stopping rule: the model budget ---------------------------------
+    # Enforced before a single call is made, because the failure it guards
+    # against is a close that has gone wrong in a way the model cannot fix -
+    # a corrupt file, a source in the wrong format - where every item lands on
+    # the queue and each one costs money to be told nothing.
+    budget = max(1, int(config.max_llm_calls_per_100 * result.records_processed / 100))
+    if len(still_open) > budget:
+        deferred = still_open[budget:]
+        still_open, payloads = still_open[:budget], payloads[:budget]
+        for exc in deferred:
+            exc.reason += (
+                f" | model budget reached ({budget} calls for "
+                f"{result.records_processed} records) - not sent to a model"
+            )
+            result.exceptions.append(exc)
+        result.stops.append(
+            f"model_budget: {len(deferred)} exception(s) held back at {budget} "
+            f"call(s); a close needing more than "
+            f"{config.max_llm_calls_per_100:.1f} per 100 records has a problem "
+            f"no model is going to resolve"
+        )
+
     # Classification is independent per exception and entirely I/O-bound, so
     # the calls overlap. A local model answers in ~14s; thirteen of those in
     # series is three minutes of a close spent waiting on one optional layer.
     #
-    # Only the *calls* are concurrent. Every result is then consumed in the
-    # original order, because verification, the exception list and rule
-    # admission all depend on sequence - a close whose output shuffled with
-    # thread scheduling could not be signed off, and the digest would move.
-    proposals = _classify_all(client, still_open, payloads, config.llm_concurrency)
+    # Dispatched in chunks rather than all at once so the refusal streak below
+    # is a real stop and not a report written after the money was spent.
+    #
+    # Only the *calls* are concurrent. Every result is consumed in the original
+    # order, because verification, the exception list and rule admission all
+    # depend on sequence - a close whose output shuffled with thread scheduling
+    # could not be signed off, and the digest would move.
+    refusals = 0
+    abandoned = False
 
-    for exc, proposal in zip(still_open, proposals, strict=True):
-        result.llm_calls += 1
+    for start in range(0, len(still_open), config.llm_concurrency):
+        chunk = still_open[start:start + config.llm_concurrency]
+        chunk_payloads = payloads[start:start + config.llm_concurrency]
 
-        if float(proposal.get("confidence", 0)) < config.confidence_floor:
-            exc.reason += f" | llm declined (confidence {proposal.get('confidence')})"
-            result.exceptions.append(exc)
+        if abandoned:
+            for exc in chunk:
+                exc.reason += " | layer 3 abandoned for this close"
+                result.exceptions.append(exc)
             continue
 
-        expected = nets.get(exc.subject_id, Money("0.00"))
-        verdict = verify_proposal(proposal, expected, credit_amounts)
-        if not verdict.ok:
-            # The model was confident and wrong, or confident and unverifiable.
-            # Either way the item stays a human's problem, and we record why.
-            exc.reason += f" | llm proposal rejected: {verdict.reason}"
-            result.exceptions.append(exc)
-            continue
+        proposals = _classify_all(client, chunk, chunk_payloads, config.llm_concurrency)
 
-        finding = to_finding(proposal, exc, verdict)
-        if finding is None:
-            exc.reason += " | llm proposal unparseable"
-            result.exceptions.append(exc)
-            continue
-        result.findings.append(finding)
+        for exc, proposal in zip(chunk, proposals, strict=True):
+            result.llm_calls += 1
 
-        # --- learn from it, if it survives the admission gate --------------
-        if config.learn_rules and proposal.get("proposed_rule"):
-            candidate = rule_from_proposal(proposal["proposed_rule"], exc.subject_id)
-            if candidate:
-                candidate = _with_id(candidate, next_rule_id(store, candidate.kind))
-                store.propose(candidate, history)
+            if float(proposal.get("confidence", 0)) < config.confidence_floor:
+                exc.reason += (
+                    f" | llm declined (confidence {proposal.get('confidence')})"
+                )
+                result.exceptions.append(exc)
+                # A decline is the model behaving correctly about its own
+                # limits, so it does not count towards abandoning it.
+                continue
+
+            expected = nets.get(exc.subject_id, Money("0.00"))
+            verdict = verify_proposal(proposal, expected, credit_amounts)
+            if not verdict.ok:
+                # The model was confident and wrong, or confident and
+                # unverifiable. Either way the item stays a human's problem,
+                # and we record why.
+                exc.reason += f" | llm proposal rejected: {verdict.reason}"
+                result.exceptions.append(exc)
+                refusals += 1
+                if refusals >= config.max_consecutive_refusals:
+                    abandoned = True
+                    result.stops.append(
+                        f"model_refusal_streak: {refusals} consecutive proposals "
+                        f"refused by arithmetic - layer 3 abandoned for this "
+                        f"close. A model wrong that many times running is not "
+                        f"having a bad patch, and the remaining calls buy the "
+                        f"same exception list at a price"
+                    )
+                continue
+
+            finding = to_finding(proposal, exc, verdict)
+            if finding is None:
+                exc.reason += " | llm proposal unparseable"
+                result.exceptions.append(exc)
+                refusals += 1
+                continue
+
+            result.findings.append(finding)
+            refusals = 0
+
+            # --- learn from it, if it survives the admission gate ----------
+            if config.learn_rules and proposal.get("proposed_rule"):
+                candidate = rule_from_proposal(
+                    proposal["proposed_rule"], exc.subject_id
+                )
+                if candidate:
+                    candidate = _with_id(
+                        candidate, next_rule_id(store, candidate.kind)
+                    )
+                    store.propose(candidate, history)
 
     result.elapsed_s = time.perf_counter() - started
     return result

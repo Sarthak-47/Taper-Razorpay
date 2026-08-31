@@ -139,6 +139,14 @@ period and are checked for recurrence. Running the same six closes with learning
 disabled is the control: with the loop the rate-card question is asked once, and
 without it every close. A test asserts the two runs must disagree.
 
+**It refuses closes it cannot stand behind.** Stopping rules decide whether a
+close is fit to sign: a missing source, under half the batches matched, a third
+of credited money tied to no batch. A refused close says so above its own
+numbers, because from the KPI row down it looks exactly like a good one. Two of
+the rules — the model budget and the refusal streak — are enforced inside the
+pipeline rather than reported after it, and a stop costs recall and human time
+but never correctness.
+
 **Calibration, not just accuracy.** Stated confidence is compared against
 observed hit rate, and the auto-clear threshold is derived from that curve rather
 than picked. Brier skill is reported next to AUC because skill is sensitive to
@@ -245,11 +253,12 @@ scanned; ~1.5 µs per record, flat across 50× data growth.
 | `forensics.py` | Benford screening with a derived threshold |
 | `cashflow.py` | The cash position |
 | `forecast.py` | Forward cash, the lag model and its backtest |
+| `signoff.py` | Stopping rules, and the refusal to sign |
 | `materiality.py` | What deserves a person, and the aggregation rule |
 | `aging.py` | Exception identity across closes, and the stale check |
 | `report.py` | The self-contained HTML close package |
 | `adapters/razorpay.py` | Razorpay's real settlement recon schema |
-| `tests/` | 172 invariants, organised by the claim each one guards |
+| `tests/` | 181 invariants, organised by the claim each one guards |
 
 The test suite is organised by **claim**, not by module: each section guards a
 sentence the writeup makes, so a failure means the writeup has become false.

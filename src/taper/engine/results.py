@@ -98,6 +98,11 @@ class ReconResult:
     llm_calls: int = 0
     records_processed: int = 0
     elapsed_s: float = 0.0
+    # Stopping rules that fired during this close. Metadata about how the close
+    # was produced rather than a conclusion of it, so deliberately outside the
+    # digest: two runs that reach the same answer by different routes should
+    # still hash alike.
+    stops: list[str] = field(default_factory=list)
 
     # ---- headline numbers a controller actually reads --------------------
     @property

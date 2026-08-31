@@ -493,6 +493,13 @@ tr.total td{font-weight:600;border-top:2px solid var(--ink)}
 .banner{background:var(--warn-bg);border-left:3px solid var(--accent);
  padding:13px 16px;margin:22px 0;font-size:14px}
 .banner.warn{background:var(--err-bg);border-left-color:var(--bad)}
+/* A refused close has to be unmissable. It otherwise looks identical to a good
+   one from the KPI row down, which is the entire reason the sign-off gate
+   exists - so this sits above the numbers and does not read as a footnote. */
+.banner.err{background:var(--err-bg);border-left:6px solid var(--bad);
+ border-top:1px solid var(--bad);border-bottom:1px solid var(--bad)}
+.banner ul{margin:10px 0 0;padding-left:20px}
+.banner li{margin:4px 0}
 .legend{margin-top:10px;font-size:12.5px;color:var(--muted)}
 .key{display:inline-flex;align-items:center;margin-right:16px}
 .key i{width:10px;height:10px;border-radius:2px;margin-right:6px;display:inline-block}
@@ -1000,6 +1007,39 @@ def render(
             "Layer 3 ran against the built-in mock, so any figure attributed to model "
             "judgement in this report is a stand-in and must not be reported as an "
             "LLM result.</div>"
+        )
+
+    # --- sign-off, above the numbers --------------------------------------
+    # Deliberately before the KPI row. A close that should not be filed must
+    # say so before it shows anybody a match rate, because a refused close and
+    # a good one otherwise look identical from here down.
+    from .signoff import evaluate
+
+    verdict = evaluate(result, case.bundle)
+    if verdict.halts:
+        reasons = "".join(
+            f"<li><strong>{_esc(trip.rule)}</strong> — {_esc(trip.observed)} "
+            f"(threshold {_esc(trip.threshold)}). {_esc(trip.action)}</li>"
+            for trip in verdict.halts
+        )
+        p.append(
+            f"<div class='banner err'><strong>DO NOT SIGN.</strong> "
+            f"{len(verdict.halts)} halt condition(s) tripped, so this close is "
+            f"not evidence of anything and should not be filed. Every number "
+            f"below is reported as measured and none of it is trustworthy."
+            f"<ul>{reasons}</ul></div>"
+        )
+    elif verdict.degrades:
+        caveats = "".join(
+            f"<li><strong>{_esc(trip.rule)}</strong> — {_esc(trip.observed)}. "
+            f"{_esc(trip.action)}</li>"
+            for trip in verdict.degrades
+        )
+        p.append(
+            f"<div class='banner warn'><strong>Signed with caveats.</strong> No "
+            f"halt conditions, but {len(verdict.degrades)} thing(s) travel with "
+            f"this close rather than waiting to be discovered by whoever relies "
+            f"on it.<ul>{caveats}</ul></div>"
         )
 
     # --- headline ---------------------------------------------------------

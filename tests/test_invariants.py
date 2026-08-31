@@ -2957,3 +2957,177 @@ def test_a_thin_sample_refuses_to_quote_a_percentile() -> None:
     fat = LagModel(observations=[2] * MIN_OBSERVATIONS)
     assert fat.usable
     assert fat.median == 2
+
+
+# --------------------------------------------------------------------------
+# Claim: "the agent refuses to sign a close it cannot stand behind"
+#
+# An engine that always emits a report emits one for a truncated bank statement
+# too, and it looks exactly like a good close. A number that is always produced
+# carries no information about whether it should have been.
+# --------------------------------------------------------------------------
+
+def test_a_healthy_close_is_signed() -> None:
+    from taper.signoff import evaluate
+
+    case = generate(n_batches=40, seed=99)
+    result = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    report = evaluate(result, case.bundle)
+
+    assert report.signed
+    assert report.decision == "SIGN"
+    assert not report.halts
+
+
+@pytest.mark.parametrize("what", ["no_settlement", "truncated_bank", "wrong_period"])
+def test_every_halt_rule_actually_fires(what: str) -> None:
+    """A bound that never binds is decoration.
+
+    Each rule is exercised against data broken in the way it exists to catch,
+    because a stopping rule nobody has seen fire is a comment with a threshold
+    in it.
+    """
+    from taper.models import SourceBundle
+    from taper.signoff import evaluate
+
+    case = generate(n_batches=40, seed=99)
+    bundles = {
+        "no_settlement": SourceBundle(
+            ledger=case.bundle.ledger, settlement=[], bank=case.bundle.bank,
+            period=case.bundle.period),
+        "truncated_bank": SourceBundle(
+            ledger=case.bundle.ledger, settlement=case.bundle.settlement,
+            bank=case.bundle.bank[:5], period=case.bundle.period),
+        "wrong_period": SourceBundle(
+            ledger=case.bundle.ledger,
+            settlement=case.bundle.settlement[: len(case.bundle.settlement) // 6],
+            bank=case.bundle.bank, period=case.bundle.period),
+    }
+    bundle = bundles[what]
+    result = reconcile(bundle, config=RunConfig(use_llm=False))
+    report = evaluate(result, bundle)
+
+    assert report.halts, f"{what} was signed off"
+    assert report.decision == "DO NOT SIGN"
+    assert not report.signed
+    for trip in report.halts:
+        assert trip.why and trip.action, "a halt with no explanation or next step"
+
+
+def test_the_model_budget_is_enforced_not_just_reported() -> None:
+    """A stopping rule that only appears in a summary is a comment.
+
+    The budget must hold calls back before they are made, and the items it
+    holds back must land on the exception list rather than being decided
+    without evidence.
+    """
+    from taper.engine.llm import MockClient
+
+    case = generate(n_batches=40, seed=99)
+    unbounded = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_llm_calls_per_100=100.0,
+                         max_consecutive_refusals=10**6),
+        client=MockClient(),
+    )
+    budgeted = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_llm_calls_per_100=0.2,
+                         max_consecutive_refusals=10**6),
+        client=MockClient(),
+    )
+
+    assert budgeted.llm_calls < unbounded.llm_calls, "the budget changed nothing"
+    assert any(s.startswith("model_budget") for s in budgeted.stops)
+    # Nothing is lost: what was not sent to a model is still a human's problem.
+    assert len(budgeted.exceptions) >= len(unbounded.exceptions)
+
+
+def test_a_refusal_streak_abandons_the_model_for_the_close() -> None:
+    from taper.engine.llm import MockClient
+
+    case = generate(n_batches=40, seed=99)
+    patient = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_consecutive_refusals=10**6),
+        client=MockClient(),
+    )
+    impatient = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_consecutive_refusals=2),
+        client=MockClient(),
+    )
+
+    assert impatient.llm_calls < patient.llm_calls
+    assert any(s.startswith("model_refusal_streak") for s in impatient.stops)
+
+
+def test_the_default_stops_do_not_bind_on_a_healthy_close() -> None:
+    """The other half of the calibration, and the reason it matters.
+
+    At max_consecutive_refusals=5 the streak stop fired on perfectly good
+    closes and pulled month-one model calls from 1.12 to 0.78. The taper is a
+    claim about *learning* reducing model calls; a stop quietly truncating them
+    would have taken credit for it. Defaults must leave a healthy close alone.
+    """
+    from taper.engine.llm import MockClient
+
+    for seed in SEEDS:
+        case = generate(n_batches=40, seed=seed)
+        result = reconcile(
+            case.bundle, config=RunConfig(use_llm=True), client=MockClient()
+        )
+        assert not result.stops, (
+            f"a default stopping rule fired on a healthy close (seed {seed}): "
+            f"{result.stops}"
+        )
+
+
+def test_stops_are_not_part_of_the_close_digest() -> None:
+    """How a close was produced is not a conclusion of it.
+
+    Two runs reaching the same matches, findings and exceptions should hash
+    alike even if one of them hit a budget on the way.
+    """
+    from taper.attest import attest
+    from taper.engine.llm import MockClient
+
+    case = generate(n_batches=40, seed=99)
+    result = reconcile(
+        case.bundle, config=RunConfig(use_llm=True), client=MockClient()
+    )
+    before = attest(result).line()
+    result.stops.append("synthetic_stop: for this test only")
+    assert attest(result).line() == before
+
+
+def test_a_refused_close_says_so_above_the_numbers() -> None:
+    """From the KPI row down, a refused close looks exactly like a good one.
+
+    That is the whole reason the gate exists, so the banner has to sit above
+    the numbers rather than read as a footnote under them.
+    """
+    from taper.generator import GeneratedCase
+    from taper.metrics.harness import score as _score
+    from taper.models import SourceBundle
+    from taper.report import render
+
+    case = generate(n_batches=40, seed=99)
+    broken = SourceBundle(
+        ledger=case.bundle.ledger, settlement=case.bundle.settlement,
+        bank=case.bundle.bank[:5], period=case.bundle.period,
+    )
+    bad_case = GeneratedCase(bundle=broken, defects=case.defects)
+    result = reconcile(broken, config=RunConfig(use_llm=False))
+    html = render(result, _score(bad_case, result, "none"), bad_case, "2026-06")
+
+    assert "DO NOT SIGN" in html
+    assert html.index("DO NOT SIGN") < html.index("clean match rate"), (
+        "the refusal is printed below the numbers it is refusing"
+    )
+    assert "match_rate_floor" in html
+
+    # And a healthy close carries no such banner.
+    good = reconcile(case.bundle, config=RunConfig(use_llm=False))
+    good_html = render(good, _score(case, good, "none"), case, "2026-06")
+    assert "DO NOT SIGN" not in good_html

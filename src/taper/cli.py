@@ -912,6 +912,136 @@ def cmd_forecast(args) -> None:
     print(BAR)
 
 
+def _signoff_block(label: str, report, indent: str = "  ") -> None:
+    from .signoff import Severity
+
+    print(f"{indent}{label:<34}{report.decision}")
+    for trip in report.trips:
+        mark = "!!" if trip.severity is Severity.HALT else " -"
+        print(f"{indent}   {mark} {trip.rule}: {trip.observed}")
+
+
+def cmd_signoff(args) -> None:
+    """The stopping rules, and each one refusing a close it should refuse."""
+    from .models import SourceBundle
+    from .signoff import evaluate
+
+    cfg, client_name = _client_and_config(args)
+    _warn_mock(args)
+    case = generate(n_batches=args.batches, seed=args.seed)
+
+    print(BAR)
+    print(f"  SIGN-OFF - stopping rules  (seed {args.seed})")
+    print(BAR)
+    print("  Everything else in this project decides what is true about a")
+    print("  close. This decides whether the close is fit to be signed at all.")
+    print("")
+    print("  An engine that always produces a report will always produce a")
+    print("  report - including for a period where the bank statement was")
+    print("  truncated or the settlement file never arrived. The output looks")
+    print("  identical to a good close: a match rate, a findings table, an")
+    print("  exception list. It is simply wrong, and nothing in it says so.")
+
+    healthy = reconcile(case.bundle, config=cfg)
+    verdict = evaluate(healthy, case.bundle)
+
+    print(f"\n  {'-' * 68}")
+    print("  THIS CLOSE")
+    print(f"  {'-' * 68}")
+    _signoff_block("verdict", verdict)
+    print("")
+    for line in textwrap.wrap(verdict.verdict(), width=68,
+                              initial_indent="  ", subsequent_indent="  "):
+        print(line)
+
+    # --- each rule, against a close that should trip it -------------------
+    print(f"\n  {'-' * 68}")
+    print("  EVERY RULE, FIRING")
+    print(f"  {'-' * 68}")
+    print("  A bound that never binds is decoration. Each rule below is shown")
+    print("  refusing a close it is supposed to refuse, on data broken the way")
+    print("  the rule exists to catch.")
+    print("")
+
+    broken = [
+        ("settlement file never arrived",
+         SourceBundle(ledger=case.bundle.ledger, settlement=[],
+                      bank=case.bundle.bank, period=case.bundle.period)),
+        ("bank statement truncated",
+         SourceBundle(ledger=case.bundle.ledger, settlement=case.bundle.settlement,
+                      bank=case.bundle.bank[:5], period=case.bundle.period)),
+        ("wrong period exported",
+         SourceBundle(ledger=case.bundle.ledger,
+                      settlement=case.bundle.settlement[: len(case.bundle.settlement) // 6],
+                      bank=case.bundle.bank, period=case.bundle.period)),
+    ]
+    for label, bundle in broken:
+        result = reconcile(bundle, config=RunConfig(use_llm=False))
+        _signoff_block(label, evaluate(result, bundle))
+        print("")
+
+    # --- the two stops that change behaviour rather than reporting it -----
+    print(f"  {'-' * 68}")
+    print("  STOPS THAT CHANGE WHAT THE CLOSE DOES")
+    print(f"  {'-' * 68}")
+    print("  The two below are enforced inside the pipeline: they hold calls")
+    print("  back and abandon a layer mid-run. A stopping rule that only ever")
+    print("  appears in a summary is a comment with a threshold in it.")
+    print("")
+
+    from .engine.llm import MockClient
+
+    baseline = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_llm_calls_per_100=100.0,
+                         max_consecutive_refusals=10**6),
+        client=MockClient(),
+    )
+    budgeted = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_llm_calls_per_100=0.2,
+                         max_consecutive_refusals=10**6),
+        client=MockClient(),
+    )
+    streaked = reconcile(
+        case.bundle,
+        config=RunConfig(use_llm=True, max_llm_calls_per_100=100.0,
+                         max_consecutive_refusals=2),
+        client=MockClient(),
+    )
+
+    print(f"  {'':<28}{'model calls':>13}{'exceptions':>13}")
+    for label, run in (("unbounded", baseline),
+                       ("budget 0.2 / 100 records", budgeted),
+                       ("abandon after 2 refusals", streaked)):
+        print(f"  {label:<28}{run.llm_calls:>13}{len(run.exceptions):>13}")
+    print("")
+    for run in (budgeted, streaked):
+        for stop in run.stops:
+            for line in textwrap.wrap(stop, width=64,
+                                      initial_indent="    - ",
+                                      subsequent_indent="      "):
+                print(line)
+    print("")
+    print("  Precision is unchanged in all three. A stop costs recall and")
+    print("  human time, never correctness - the items it holds back land on")
+    print("  the exception list rather than being decided without evidence.")
+
+    print(f"\n  {'-' * 68}")
+    print("  WHY THESE NUMBERS")
+    print(f"  {'-' * 68}")
+    print("  Each threshold was set against measured behaviour on healthy")
+    print("  closes, not chosen because it sounded prudent. The refusal streak")
+    print("  is the clearest case: at 5 it fired on perfectly good closes and")
+    print("  pulled month-one model calls from 1.12 to 0.78. That would have")
+    print("  been worse than useless - the taper is a claim about learning, and")
+    print("  a stop quietly truncating calls would have taken credit for it.")
+    print("  Measured across eight seeds, the longest refusal run on a healthy")
+    print("  close was 10, so the default sits at 12.")
+    print(f"  resolver: {client_name}")
+    print(BAR)
+
+
 def cmd_forensics(args) -> None:
     """First-digit analysis: does this population look lived, or authored?"""
     from .forensics import BENFORD, MIN_SAMPLE, profile_by_segment
@@ -1499,6 +1629,11 @@ def main(argv: list[str] | None = None) -> int:
     fo.add_argument("--seed", type=int, default=99)
     fo.add_argument("--horizon", type=int, default=14)
     fo.set_defaults(func=cmd_forecast)
+
+    so = sub.add_parser("signoff", parents=[shared],
+                        help="stopping rules: when the agent refuses to sign the close")
+    so.add_argument("--seed", type=int, default=99)
+    so.set_defaults(func=cmd_signoff)
 
     fx = sub.add_parser("forensics", parents=[shared],
                         help="first-digit analysis: lived amounts, or authored?")
