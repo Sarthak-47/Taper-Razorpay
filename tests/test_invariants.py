@@ -2646,3 +2646,65 @@ def test_the_report_prints_light_even_after_the_toggle_says_dark() -> None:
         "the print palette does not override an explicit dark theme, so a "
         "reader who toggled dark will print dark ink on dark paper"
     )
+
+
+# --------------------------------------------------------------------------
+# Claim: the documentation's own cross-references work
+#
+# The writeup carries the argument, and it is now spread over four files. A
+# dead link in the paragraph that says "the evidence is here" is worse than no
+# link: it is a claim you cannot check, in the section asking to be checked.
+# --------------------------------------------------------------------------
+
+def _github_slug(title: str) -> str:
+    """GitHub's heading-anchor rule.
+
+    Lowercase, drop punctuation, then turn each remaining space into one
+    hyphen. Runs of spaces are *not* collapsed - which is why a heading with an
+    em dash produces a double hyphen. Collapsing them here would report working
+    links as broken, and the obvious "fix" would then break them for real.
+    """
+    import re as _re
+
+    text = _re.sub(r"`|\*|_", "", title.strip()).lower()
+    text = _re.sub(r"[^\w\s-]", "", text)
+    return text.replace(" ", "-")
+
+
+def test_every_link_between_the_documents_resolves() -> None:
+    import re as _re
+
+    root = Path(__file__).resolve().parents[1]
+    paths = [
+        root / "README.md",
+        root / "docs" / "RESULTS.md",
+        root / "docs" / "ARCHITECTURE.md",
+        root / "data" / "sample" / "README.md",
+    ]
+    for path in paths:
+        assert path.is_file(), f"{path.name} has gone missing"
+
+    docs = {p: p.read_text(encoding="utf-8") for p in paths}
+    anchors = {
+        p: {_github_slug(m.group(1))
+            for m in _re.finditer(r"^#{1,6}\s+(.*)$", text, _re.M)}
+        for p, text in docs.items()
+    }
+
+    broken: list[str] = []
+    for src, text in docs.items():
+        for target in _re.findall(r"\]\(([^)]+)\)", text):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            file_part, _, fragment = target.partition("#")
+            owner = src
+            if file_part:
+                dest = (src.parent / file_part).resolve()
+                if not dest.exists():
+                    broken.append(f"{src.name} -> {target} (no such file)")
+                    continue
+                owner = next((k for k in docs if k.resolve() == dest), None)
+            if fragment and owner is not None and fragment not in anchors[owner]:
+                broken.append(f"{src.name} -> {target} (no such heading)")
+
+    assert not broken, "dead documentation links:\n  " + "\n  ".join(broken)
