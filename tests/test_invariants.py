@@ -3131,3 +3131,63 @@ def test_a_refused_close_says_so_above_the_numbers() -> None:
     good = reconcile(case.bundle, config=RunConfig(use_llm=False))
     good_html = render(good, _score(case, good, "none"), case, "2026-06")
     assert "DO NOT SIGN" not in good_html
+
+
+def test_no_provider_falls_back_to_the_deterministic_layers() -> None:
+    """The README promises nothing is required. It has to be true.
+
+    Before this, every documented command that did not spell out --no-llm died
+    on a missing ANTHROPIC_API_KEY - so the page said one thing and the tool did
+    another. The fallback is loud and it drops layer 3 entirely rather than
+    substituting the offline heuristic, because mock output presented as model
+    output is the one confusion this project cannot afford.
+    """
+    import argparse
+    import os
+
+    from taper.cli import _client_and_config
+
+    args = argparse.Namespace(
+        mock=False, no_llm=False, llm=None, llm_base_url=None, llm_model=None
+    )
+    saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        cfg, name = _client_and_config(args)
+    finally:
+        if saved is not None:
+            os.environ["ANTHROPIC_API_KEY"] = saved
+
+    assert cfg.use_llm is False
+    assert name == "none (deterministic only)"
+    assert "mock" not in name.lower(), "fell back to the heuristic, not to honesty"
+
+
+def test_an_explicit_provider_choice_still_fails_loudly() -> None:
+    """Falling back is for people who said nothing, not for people who chose.
+
+    Someone who typed --llm anthropic wants Anthropic, and quietly giving them
+    a deterministic run would hide the reason their numbers look different.
+    """
+    import argparse
+    import os
+
+    from taper.cli import _client_and_config
+
+    args = argparse.Namespace(
+        mock=False, no_llm=False, llm="anthropic", llm_base_url=None, llm_model=None
+    )
+    saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        cfg, _ = _client_and_config(args)
+    finally:
+        if saved is not None:
+            os.environ["ANTHROPIC_API_KEY"] = saved
+
+    assert cfg.use_llm is True, "an explicit choice was silently overridden"
+
+
+def test_a_missing_provider_is_a_message_not_a_traceback() -> None:
+    """`ablate` cannot run without the arm it measures, and must say so."""
+    from taper.cli import main
+
+    assert main(["--no-llm", "ablate", "--seed", "99", "--batches", "20"]) == 2

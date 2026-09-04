@@ -30,8 +30,37 @@ BAR = "=" * 72
 
 
 def _client_and_config(args) -> tuple[RunConfig, str]:
+    import os
+
     use_real = not args.mock
-    provider = getattr(args, "llm", "anthropic")
+    provider = getattr(args, "llm", None) or "anthropic"
+
+    # Fall back to the deterministic layers when nobody has said which model to
+    # use and there is no key to use one. The README's central promise is that
+    # nothing is required, and before this every documented command that did not
+    # spell out --no-llm died on a missing key - so the page said one thing and
+    # the tool did another.
+    #
+    # Loud, never silent, and never a substitution: this drops layer 3 entirely
+    # rather than quietly swapping in the offline heuristic, because mock output
+    # presented as model output is the one confusion this project cannot afford.
+    auto_deterministic = (
+        not args.no_llm
+        and not args.mock
+        and getattr(args, "llm", None) is None
+        and not os.environ.get("ANTHROPIC_API_KEY")
+    )
+    if auto_deterministic:
+        print(
+            "\n  No model provider configured, so this is running on the"
+            "\n  deterministic layers only - which is the honest baseline and"
+            "\n  reproduces most of the writeup. For layer 3: --llm ollama for a"
+            "\n  local model, ANTHROPIC_API_KEY for a hosted one, or --mock for"
+            "\n  the offline heuristic, whose numbers are not model results.\n",
+            file=sys.stderr,
+        )
+        args.no_llm = True
+
     cfg = RunConfig(
         use_llm=not args.no_llm,
         use_real_llm=use_real,
@@ -210,6 +239,17 @@ this seed without --clean to see the same engine on a month with defects.
 
 
 def cmd_ablate(args) -> None:
+    # An ablation compares the stack with and without layer 3, so --no-llm asks
+    # to remove the very arm under test. Said plainly here rather than left to
+    # fail later demanding a provider it was just told not to use.
+    if args.no_llm:
+        raise RuntimeError(
+            "--no-llm removes the arm this command exists to measure: an "
+            "ablation compares the deterministic layers against the "
+            "deterministic layers plus a model. Run `--mock ablate` for the "
+            "offline resolver, or `--llm ollama ablate` for a local model."
+        )
+
     case = generate(n_batches=args.batches, seed=args.seed)
     _warn_mock(args)
 
@@ -1544,8 +1584,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="use the offline heuristic instead of a real model")
     p.add_argument("--no-llm", action="store_true", help="deterministic layers only")
     p.add_argument("--batches", type=int, default=40)
+    # Default None, not "anthropic": the fallback above has to tell "the user
+    # picked anthropic" apart from "the user picked nothing". An explicit
+    # --llm anthropic with no key still fails, and should.
     p.add_argument("--llm", choices=("anthropic", "ollama", "openai-compatible"),
-                   default="anthropic", help="which real provider layer 3 uses")
+                   default=None, help="which real provider layer 3 uses")
     p.add_argument("--llm-base-url", default=None)
     p.add_argument("--llm-model", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1689,7 +1732,20 @@ def main(argv: list[str] | None = None) -> int:
     e.set_defaults(func=cmd_evaluate)
 
     args = p.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except RuntimeError as exc:
+        # A missing provider is a configuration problem with a known fix, not a
+        # crash. The message raised at the call site already says exactly what
+        # to do; wrapping it in a stack trace only buries that. This is the
+        # first thing a reviewer without an API key hits, so it must read as an
+        # answer rather than as a failure.
+        print(BAR)
+        print("  CANNOT RUN THIS COMMAND")
+        print(BAR)
+        print(_wrapped(str(exc), width=68, indent="  "))
+        print(BAR)
+        return 2
     return 0
 
 

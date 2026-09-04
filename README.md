@@ -25,7 +25,7 @@ This is an AI buildathon entry whose own ablation says the AI is not earning its
 place. That is the first thing you should see, not the last:
 
 ```bash
-python -m taper.cli ablate --seed 99
+python -m taper.cli --mock ablate --seed 99
 ```
 
 ```
@@ -487,7 +487,7 @@ overrules it. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the whole design
 in one page: the four layers, the three independent reasons the model cannot
 decide anything, and how the taper is measured.
 
-**181 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
+**184 tests**, CI on Python 3.11–3.13. The tests are not coverage — each one
 guards a claim made below, so a failure means a sentence here has become false.
 
 ---
@@ -633,7 +633,7 @@ python -m taper.cli campaign --months 5 --average-runs 8
 Does the model earn its place?
 
 ```bash
-python -m taper.cli ablate --seed 99
+python -m taper.cli --mock ablate --seed 99
 ```
 
 Tuning set vs held-out set:
@@ -706,7 +706,7 @@ affect a single future close.
 
 ## Status
 
-Running end-to-end: **181 tests green, 20 CLI commands**, no API key required.
+Running end-to-end: **184 tests green, 20 CLI commands**, no API key required.
 
 All four layers are wired, and **all four rule types now learn end to end** —
 `adjustment_pattern`, `narration_alias`, `bank_timing` and `fee_variant`, the
