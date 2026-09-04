@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/Sarthak-47/Razorpay"
+Repository = "https://github.com/Sarthak-47/Taper-Razorpay"
 
 [project.scripts]
 taper = "taper.cli:main"

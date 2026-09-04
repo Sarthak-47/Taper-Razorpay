@@ -2,7 +2,7 @@
 
 **A settlement reconciliation agent that shrinks its own AI usage over time.**
 
-[![CI](https://github.com/Sarthak-47/Razorpay/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarthak-47/Razorpay/actions/workflows/ci.yml)
+[![CI](https://github.com/Sarthak-47/Taper-Razorpay/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarthak-47/Taper-Razorpay/actions/workflows/ci.yml)
 [![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.13-blue)](pyproject.toml)
 [![Dependencies: none](https://img.shields.io/badge/runtime%20dependencies-none-success)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
